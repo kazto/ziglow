@@ -1,27 +1,238 @@
+//! ziglow — Render markdown on the CLI, with pizzazz!
+//! Zig re-implementation of charmbracelet/glow.
 const std = @import("std");
-const ziglow = @import("ziglow");
+const zchomd = @import("zchomd");
+const zchomptic = @import("zchomptic");
+const tui = @import("tui.zig");
+
+const version = "0.1.0";
+
+const readme_names = [_][]const u8{
+    "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
+};
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try ziglow.bufferedPrint();
-}
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
 
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
+    // --- Argument parsing ---
+    var file_arg: ?[]const u8 = null;
+    var style_name: []const u8 = "auto";
+    var width: u32 = 0;
+    var use_pager = false;
+    var use_tui = false;
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--style")) {
+            i += 1;
+            if (i < argv.len) style_name = argv[i];
+        } else if (std.mem.startsWith(u8, arg, "--style=")) {
+            style_name = arg["--style=".len..];
+        } else if (std.mem.eql(u8, arg, "-w") or std.mem.eql(u8, arg, "--width")) {
+            i += 1;
+            if (i < argv.len) {
+                width = std.fmt.parseInt(u32, argv[i], 10) catch 0;
+            }
+        } else if (std.mem.startsWith(u8, arg, "--width=")) {
+            width = std.fmt.parseInt(u32, arg["--width=".len..], 10) catch 0;
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--pager")) {
+            use_pager = true;
+        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tui")) {
+            use_tui = true;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            printHelp();
+            return;
+        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+            try std.fs.File.stdout().writeAll("ziglow " ++ version ++ "\n");
+            return;
+        } else if (std.mem.eql(u8, arg, "-")) {
+            file_arg = "-";
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            file_arg = arg;
         }
+    }
+
+    // --- Terminal detection ---
+    const is_terminal = std.posix.isatty(std.posix.STDOUT_FILENO);
+    const stdin_is_pipe = !std.posix.isatty(std.posix.STDIN_FILENO);
+
+    // --- Auto-detect width ---
+    if (width == 0) {
+        if (is_terminal) {
+            const sz = zchomptic.terminal.TerminalState.getSize();
+            width = @min(sz.width, 120);
+        }
+        if (width == 0) width = 80;
+    }
+
+    // --- Effective style ---
+    const effective_style: []const u8 = blk: {
+        if (!is_terminal and std.mem.eql(u8, style_name, "auto")) break :blk "notty";
+        if (std.mem.eql(u8, style_name, "auto")) break :blk "dark";
+        break :blk style_name;
     };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+
+    // --- Dispatch ---
+    if (stdin_is_pipe and file_arg == null) {
+        // Piped stdin
+        const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
+        defer allocator.free(content);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui);
+        return;
+    }
+
+    const path = file_arg orelse ".";
+
+    if (std.mem.eql(u8, path, "-")) {
+        const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
+        defer allocator.free(content);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui);
+        return;
+    }
+
+    // Check for directory
+    {
+        var dir = std.fs.cwd().openDir(path, .{}) catch {
+            // Not a directory — treat as file
+            try processFile(allocator, path, effective_style, width, use_pager, use_tui);
+            return;
+        };
+        dir.close();
+    }
+
+    // Directory: find README
+    const readme = try findReadme(allocator, path);
+    if (readme) |rpath| {
+        defer allocator.free(rpath);
+        try processFile(allocator, rpath, effective_style, width, use_pager, use_tui);
+    } else {
+        try std.fs.File.stderr().writeAll("ziglow: no README found\n");
+        std.process.exit(1);
+    }
+}
+
+/// Walk `dir_path` looking for a README file. Returns an owned path or null.
+fn findReadme(allocator: std.mem.Allocator, dir_path: []const u8) !?[]u8 {
+    var dir = std.fs.cwd().openDir(dir_path, .{}) catch return null;
+    defer dir.close();
+
+    for (readme_names) |name| {
+        _ = dir.statFile(name) catch continue;
+        return try std.fs.path.join(allocator, &.{ dir_path, name });
+    }
+    return null;
+}
+
+/// Open and render a markdown file.
+fn processFile(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    style_name: []const u8,
+    word_wrap: u32,
+    use_pager: bool,
+    use_tui: bool,
+) !void {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "ziglow: cannot open '{s}': {}\n", .{ path, err });
+        defer allocator.free(msg);
+        try std.fs.File.stderr().writeAll(msg);
+        std.process.exit(1);
+    };
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 50 * 1024 * 1024);
+    defer allocator.free(content);
+
+    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui);
+}
+
+/// Render `content` as Markdown and output it.
+fn processContent(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    style_name: []const u8,
+    word_wrap: u32,
+    use_pager: bool,
+    use_tui: bool,
+) !void {
+    const style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
+    var tr = zchomd.TermRenderer.init(allocator, .{
+        .styles = style_cfg,
+        .word_wrap = @intCast(word_wrap),
+    });
+    const rendered = try tr.renderAlloc(content);
+    defer allocator.free(rendered);
+
+    if (use_tui) {
+        try tui.runPager(allocator, rendered);
+    } else if (use_pager) {
+        try runExternalPager(allocator, rendered);
+    } else {
+        try std.fs.File.stdout().writeAll(rendered);
+    }
+}
+
+/// Pipe `content` through the external pager ($PAGER or "less -R").
+fn runExternalPager(allocator: std.mem.Allocator, content: []const u8) !void {
+    const pager_cmd = std.posix.getenv("PAGER") orelse "less -R";
+
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(allocator);
+
+    var it = std.mem.tokenizeScalar(u8, pager_cmd, ' ');
+    while (it.next()) |part| try parts.append(allocator, part);
+
+    if (parts.items.len == 0) {
+        try std.fs.File.stdout().writeAll(content);
+        return;
+    }
+
+    var child = std.process.Child.init(parts.items, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    try child.spawn();
+
+    if (child.stdin) |stdin| {
+        // Write all content; ignore BrokenPipe (user may have quit pager early)
+        stdin.writeAll(content) catch |err| switch (err) {
+            error.BrokenPipe => {},
+            else => return err,
+        };
+        stdin.close();
+        child.stdin = null;
+    }
+
+    _ = try child.wait();
+}
+
+fn printHelp() void {
+    const help =
+        \\ziglow - Render markdown on the CLI, with pizzazz!
+        \\
+        \\Usage: ziglow [OPTIONS] [FILE|DIR|-]
+        \\
+        \\Arguments:
+        \\  FILE        Markdown file to render
+        \\  DIR         Directory (searches for README.md)
+        \\  -           Read from stdin
+        \\  (none)      Stdin if piped, otherwise current directory
+        \\
+        \\Options:
+        \\  -s, --style <name>    Style: dark, light, notty, auto  [default: auto]
+        \\  -w, --width <n>       Word-wrap width (0 = terminal width, max 120)
+        \\  -p, --pager           Pipe output through $PAGER (default: less -R)
+        \\  -t, --tui             Built-in TUI pager (j/k scroll, q quit)
+        \\  -h, --help            Show this help
+        \\  -V, --version         Show version
+        \\
+    ;
+    std.fs.File.stdout().writeAll(help) catch {};
 }
