@@ -4,6 +4,8 @@ const std = @import("std");
 const zchomd = @import("zchomd");
 const zchomptic = @import("zchomptic");
 const tui = @import("tui.zig");
+const mermaid = @import("mermaid.zig");
+const termimage = @import("termimage.zig");
 
 const version = "0.1.0";
 
@@ -83,7 +85,7 @@ pub fn main() !void {
         // Piped stdin
         const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal);
         return;
     }
 
@@ -92,7 +94,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, path, "-")) {
         const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal);
         return;
     }
 
@@ -100,7 +102,7 @@ pub fn main() !void {
     {
         var dir = std.fs.cwd().openDir(path, .{}) catch {
             // Not a directory — treat as file
-            try processFile(allocator, path, effective_style, width, use_pager, use_tui);
+            try processFile(allocator, path, effective_style, width, use_pager, use_tui, is_terminal);
             return;
         };
         dir.close();
@@ -110,7 +112,7 @@ pub fn main() !void {
     const readme = try findReadme(allocator, path);
     if (readme) |rpath| {
         defer allocator.free(rpath);
-        try processFile(allocator, rpath, effective_style, width, use_pager, use_tui);
+        try processFile(allocator, rpath, effective_style, width, use_pager, use_tui, is_terminal);
     } else {
         try std.fs.File.stderr().writeAll("ziglow: no README found\n");
         std.process.exit(1);
@@ -137,6 +139,7 @@ fn processFile(
     word_wrap: u32,
     use_pager: bool,
     use_tui: bool,
+    is_terminal: bool,
 ) !void {
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "ziglow: cannot open '{s}': {}\n", .{ path, err });
@@ -149,10 +152,11 @@ fn processFile(
     const content = try file.readToEndAlloc(allocator, 50 * 1024 * 1024);
     defer allocator.free(content);
 
-    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui);
+    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal);
 }
 
 /// Render `content` as Markdown and output it.
+/// `is_terminal`: whether stdout is a TTY (controls style + image support).
 fn processContent(
     allocator: std.mem.Allocator,
     content: []const u8,
@@ -160,13 +164,63 @@ fn processContent(
     word_wrap: u32,
     use_pager: bool,
     use_tui: bool,
+    is_terminal: bool,
 ) !void {
     const style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
     var tr = zchomd.TermRenderer.init(allocator, .{
         .styles = style_cfg,
         .word_wrap = @intCast(word_wrap),
     });
-    const rendered = try tr.renderAlloc(content);
+
+    // Detect terminal image support and mmdc availability.
+    const stdin_is_tty = std.posix.isatty(std.posix.STDIN_FILENO);
+    const img_format = termimage.detect(is_terminal, stdin_is_tty);
+    const mmdc_path: ?[]u8 = if (is_terminal and img_format != .none)
+        try mermaid.findMmdc(allocator)
+    else
+        null;
+    defer if (mmdc_path) |p| allocator.free(p);
+
+    const rendered: []u8 = blk: {
+        if (mmdc_path) |mmdc| {
+            // ── Full pipeline: extract → render diagrams → render MD → inject ──
+            var result = try mermaid.extract(allocator, content, true);
+            defer result.deinit(allocator);
+
+            if (result.blocks.len > 0) {
+                const pngs = try mermaid.renderPNGs(allocator, result.blocks, mmdc);
+                defer {
+                    for (pngs) |p| if (p) |bytes| allocator.free(bytes);
+                    allocator.free(pngs);
+                }
+
+                const md_rendered = try tr.renderAlloc(result.markdown);
+                defer allocator.free(md_rendered);
+
+                const pngs_const: []const ?[]u8 = pngs;
+                const markers_const: []const []const u8 = result.markers;
+
+                break :blk try termimage.replaceMarkers(
+                    allocator,
+                    md_rendered,
+                    markers_const,
+                    pngs_const,
+                    img_format,
+                    word_wrap,
+                );
+            }
+            // No mermaid blocks: plain render.
+            break :blk try tr.renderAlloc(result.markdown);
+        } else if (is_terminal) {
+            // TTY but no image support: keep mermaid blocks as-is (rendered as code blocks).
+            break :blk try tr.renderAlloc(content);
+        } else {
+            // Piped output: replace mermaid blocks with placeholder text.
+            var result = try mermaid.extract(allocator, content, false);
+            defer result.deinit(allocator);
+            break :blk try tr.renderAlloc(result.markdown);
+        }
+    };
     defer allocator.free(rendered);
 
     if (use_tui) {
@@ -232,6 +286,13 @@ fn printHelp() void {
         \\  -t, --tui             Built-in TUI pager (j/k scroll, q quit)
         \\  -h, --help            Show this help
         \\  -V, --version         Show version
+        \\
+        \\Mermaid diagrams:
+        \\  Requires mmdc (Mermaid CLI) in PATH.  Install with:
+        \\    npm install -g @mermaid-js/mermaid-cli
+        \\  Diagrams are rendered to images when the terminal supports it
+        \\  (iTerm2, Kitty, WezTerm, foot, mlterm, ...).
+        \\  Set ZIGLOW_SIXEL=1 to force Sixel output (requires img2sixel or convert).
         \\
     ;
     std.fs.File.stdout().writeAll(help) catch {};
