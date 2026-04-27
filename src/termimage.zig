@@ -7,7 +7,6 @@ pub const Format = enum { none, iterm2, kitty, sixel };
 /// Detect the terminal's inline image capability.
 /// Pass whether stdout and stdin are TTYs.
 pub fn detect(stdout_is_tty: bool, stdin_is_tty: bool) Format {
-    _ = stdin_is_tty;
     if (!stdout_is_tty) return .none;
 
     // Explicit override.
@@ -19,6 +18,10 @@ pub fn detect(stdout_is_tty: bool, stdin_is_tty: bool) Format {
     if (isIterm2()) return .iterm2;
     if (isKitty()) return .kitty;
     if (isKnownSixelTerminal()) return .sixel;
+
+    // Query terminal via DA1 (Device Attributes) if stdin is available.
+    if (stdin_is_tty and querySixelViaDA1()) return .sixel;
+
     return .none;
 }
 
@@ -39,6 +42,48 @@ fn isKnownSixelTerminal() bool {
     if (std.posix.getenv("TERM")) |t| {
         const known = [_][]const u8{ "mlterm", "yaft-256color", "foot", "foot-direct", "contour" };
         for (known) |name| if (std.mem.eql(u8, t, name)) return true;
+    }
+    return false;
+}
+
+/// Query the terminal via DA1 (Primary Device Attributes) to check for Sixel support.
+fn querySixelViaDA1() bool {
+    const stdin_handle = std.posix.STDIN_FILENO;
+    const stdout_handle = std.posix.STDOUT_FILENO;
+
+    // Save terminal state and enter raw mode.
+    const termios = std.posix.tcgetattr(stdin_handle) catch return false;
+    var raw = termios;
+    // Disable echoing and canonical mode.
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+    // Set timeout (VMIN=0, VTIME=2 -> 200ms).
+    raw.cc[@intFromEnum(std.posix.system.V.MIN)] = 0;
+    raw.cc[@intFromEnum(std.posix.system.V.TIME)] = 2;
+
+    std.posix.tcsetattr(stdin_handle, .FLUSH, raw) catch return false;
+    defer std.posix.tcsetattr(stdin_handle, .FLUSH, termios) catch {};
+
+    // Send Primary Device Attributes query.
+    _ = std.posix.write(stdout_handle, "\x1b[c") catch return false;
+
+    var buf: [64]u8 = undefined;
+    const n = std.posix.read(stdin_handle, &buf) catch return false;
+    if (n == 0) return false;
+
+    return parseSixelSupport(buf[0..n]);
+}
+
+/// Parse DA1 response to see if Sixel (attribute 4) is supported.
+/// Format: ESC [ ? P1 ; P2 ; ... c
+fn parseSixelSupport(resp: []const u8) bool {
+    const start = std.mem.indexOf(u8, resp, "\x1b[?") orelse return false;
+    const end = std.mem.indexOfPos(u8, resp, start, "c") orelse return false;
+    const params = resp[start + 3 .. end];
+
+    var it = std.mem.splitScalar(u8, params, ';');
+    while (it.next()) |p| {
+        if (std.mem.eql(u8, p, "4")) return true;
     }
     return false;
 }

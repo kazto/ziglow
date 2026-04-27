@@ -172,53 +172,58 @@ fn processContent(
         .word_wrap = @intCast(word_wrap),
     });
 
-    // Detect terminal image support and mmdc availability.
-    const stdin_is_tty = std.posix.isatty(std.posix.STDIN_FILENO);
-    const img_format = termimage.detect(is_terminal, stdin_is_tty);
-    const mmdc_path: ?[]u8 = if (is_terminal and img_format != .none)
-        try mermaid.findMmdc(allocator)
-    else
-        null;
-    defer if (mmdc_path) |p| allocator.free(p);
-
     const rendered: []u8 = blk: {
-        if (mmdc_path) |mmdc| {
-            // ── Full pipeline: extract → render diagrams → render MD → inject ──
-            var result = try mermaid.extract(allocator, content, true);
-            defer result.deinit(allocator);
+        const has_mermaid = std.mem.indexOf(u8, content, "```mermaid") != null;
 
-            if (result.blocks.len > 0) {
-                const pngs = try mermaid.renderPNGs(allocator, result.blocks, mmdc);
-                defer {
-                    for (pngs) |p| if (p) |bytes| allocator.free(bytes);
-                    allocator.free(pngs);
+        if (is_terminal) {
+            if (has_mermaid) {
+                const stdin_is_tty = std.posix.isatty(std.posix.STDIN_FILENO);
+                const img_format = termimage.detect(is_terminal, stdin_is_tty);
+
+                if (img_format != .none) {
+                    if (try mermaid.findMmdc(allocator)) |mmdc| {
+                        defer allocator.free(mmdc);
+
+                        // ── Full pipeline: extract → render diagrams → render MD → inject ──
+                        var result = try mermaid.extract(allocator, content, true);
+                        defer result.deinit(allocator);
+
+                        if (result.blocks.len > 0) {
+                            const pngs = try mermaid.renderPNGs(allocator, result.blocks, mmdc);
+                            defer {
+                                for (pngs) |p| if (p) |bytes| allocator.free(bytes);
+                                allocator.free(pngs);
+                            }
+
+                            const md_rendered = try tr.renderAlloc(result.markdown);
+                            defer allocator.free(md_rendered);
+
+                            const pngs_const: []const ?[]u8 = pngs;
+                            const markers_const: []const []const u8 = result.markers;
+
+                            break :blk try termimage.replaceMarkers(
+                                allocator,
+                                md_rendered,
+                                markers_const,
+                                pngs_const,
+                                img_format,
+                                word_wrap,
+                            );
+                        }
+                    }
                 }
-
-                const md_rendered = try tr.renderAlloc(result.markdown);
-                defer allocator.free(md_rendered);
-
-                const pngs_const: []const ?[]u8 = pngs;
-                const markers_const: []const []const u8 = result.markers;
-
-                break :blk try termimage.replaceMarkers(
-                    allocator,
-                    md_rendered,
-                    markers_const,
-                    pngs_const,
-                    img_format,
-                    word_wrap,
-                );
             }
-            // No mermaid blocks: plain render.
-            break :blk try tr.renderAlloc(result.markdown);
-        } else if (is_terminal) {
-            // TTY but no image support: keep mermaid blocks as-is (rendered as code blocks).
+            // TTY fallback: render original content (shows mermaid as code block).
             break :blk try tr.renderAlloc(content);
         } else {
             // Piped output: replace mermaid blocks with placeholder text.
-            var result = try mermaid.extract(allocator, content, false);
-            defer result.deinit(allocator);
-            break :blk try tr.renderAlloc(result.markdown);
+            if (has_mermaid) {
+                var result = try mermaid.extract(allocator, content, false);
+                defer result.deinit(allocator);
+                break :blk try tr.renderAlloc(result.markdown);
+            } else {
+                break :blk try tr.renderAlloc(content);
+            }
         }
     };
     defer allocator.free(rendered);

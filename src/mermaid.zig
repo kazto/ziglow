@@ -3,7 +3,7 @@
 //! Rendering:  delegates to the `mmdc` CLI (Mermaid CLI / Node.js).
 const std = @import("std");
 
-pub const marker_prefix = "ZIGLOW_MERMAID_";
+pub const marker_prefix = "ZIGLOWMERMAID";
 pub const placeholder = "[mermaid diagram omitted]";
 
 pub const MermaidResult = struct {
@@ -201,8 +201,12 @@ pub fn renderPNG(
     defer allocator.free(tmp_in);
     const tmp_out = try std.fmt.allocPrint(allocator, "/tmp/ziglow_{x}.png", .{ts +% 1});
     defer allocator.free(tmp_out);
+    const tmp_pup = try std.fmt.allocPrint(allocator, "/tmp/ziglow_{x}.json", .{ts +% 2});
+    defer allocator.free(tmp_pup);
+
     defer std.fs.deleteFileAbsolute(tmp_in) catch {};
     defer std.fs.deleteFileAbsolute(tmp_out) catch {};
+    defer std.fs.deleteFileAbsolute(tmp_pup) catch {};
 
     // Write diagram source.
     {
@@ -211,9 +215,16 @@ pub fn renderPNG(
         f.writeAll(diagram) catch return null;
     }
 
+    // Write puppeteer config to avoid sandbox issues on Linux.
+    {
+        const f = std.fs.createFileAbsolute(tmp_pup, .{}) catch return null;
+        defer f.close();
+        f.writeAll("{\"args\":[\"--no-sandbox\"]}") catch return null;
+    }
+
     // Run mmdc.
     var child = std.process.Child.init(
-        &.{ mmdc_path, "-i", tmp_in, "-o", tmp_out },
+        &.{ mmdc_path, "-p", tmp_pup, "-i", tmp_in, "-o", tmp_out },
         allocator,
     );
     child.stdin_behavior = .Ignore;
