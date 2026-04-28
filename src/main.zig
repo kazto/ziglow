@@ -6,6 +6,7 @@ const zchomptic = @import("zchomptic");
 const tui = @import("tui.zig");
 const mermaid = @import("mermaid.zig");
 const termimage = @import("termimage.zig");
+const config = @import("config.zig");
 
 const version = "0.1.0";
 
@@ -18,15 +19,18 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var conf = try config.loadConfig(allocator);
+    defer conf.deinit(allocator);
+
     const argv = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, argv);
 
     // --- Argument parsing ---
     var file_arg: ?[]const u8 = null;
-    var style_name: []const u8 = "auto";
-    var width: u32 = 0;
-    var use_pager = false;
-    var use_tui = false;
+    var style_name: []const u8 = conf.style orelse "auto";
+    var width: u32 = conf.width orelse 0;
+    var use_pager = if (conf.pager != null) true else false;
+    var use_tui = conf.builtin_tui orelse false;
 
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
@@ -88,7 +92,7 @@ pub fn main() !void {
         // Piped stdin
         const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, conf);
         return;
     }
 
@@ -97,7 +101,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, path, "-")) {
         const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, conf);
         return;
     }
 
@@ -105,7 +109,7 @@ pub fn main() !void {
     {
         var dir = std.fs.cwd().openDir(path, .{}) catch {
             // Not a directory — treat as file
-            try processFile(allocator, path, effective_style, width, use_pager, use_tui, is_terminal);
+            try processFile(allocator, path, effective_style, width, use_pager, use_tui, is_terminal, conf);
             return;
         };
         dir.close();
@@ -115,7 +119,7 @@ pub fn main() !void {
     const readme = try findReadme(allocator, path);
     if (readme) |rpath| {
         defer allocator.free(rpath);
-        try processFile(allocator, rpath, effective_style, width, use_pager, use_tui, is_terminal);
+        try processFile(allocator, rpath, effective_style, width, use_pager, use_tui, is_terminal, conf);
     } else {
         try std.fs.File.stderr().writeAll("ziglow: no README found\n");
         std.process.exit(1);
@@ -143,6 +147,7 @@ fn processFile(
     use_pager: bool,
     use_tui: bool,
     is_terminal: bool,
+    conf: config.Config,
 ) !void {
     const file = std.fs.cwd().openFile(path, .{}) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "ziglow: cannot open '{s}': {}\n", .{ path, err });
@@ -155,7 +160,7 @@ fn processFile(
     const content = try file.readToEndAlloc(allocator, 50 * 1024 * 1024);
     defer allocator.free(content);
 
-    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal);
+    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal, conf);
 }
 
 /// Render `content` as Markdown and output it.
@@ -168,8 +173,11 @@ fn processContent(
     use_pager: bool,
     use_tui: bool,
     is_terminal: bool,
+    conf: config.Config,
 ) !void {
-    const style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
+    var style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
+    config.applyConfigToStyle(conf, &style_cfg);
+
     const img_format = termimage.detect(is_terminal, std.posix.isatty(std.posix.STDIN_FILENO));
     const use_kitty_text_sizing = (img_format == .kitty);
 
@@ -235,16 +243,15 @@ fn processContent(
     if (use_tui) {
         try tui.runPager(allocator, rendered);
     } else if (use_pager) {
-        try runExternalPager(allocator, rendered);
+        const pager_cmd = conf.pager orelse std.posix.getenv("PAGER") orelse "less -R";
+        try runExternalPager(allocator, rendered, pager_cmd);
     } else {
         try std.fs.File.stdout().writeAll(rendered);
     }
 }
 
 /// Pipe `content` through the external pager ($PAGER or "less -R").
-fn runExternalPager(allocator: std.mem.Allocator, content: []const u8) !void {
-    const pager_cmd = std.posix.getenv("PAGER") orelse "less -R";
-
+fn runExternalPager(allocator: std.mem.Allocator, content: []const u8, pager_cmd: []const u8) !void {
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
 
