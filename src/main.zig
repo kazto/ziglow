@@ -167,9 +167,13 @@ fn processContent(
     is_terminal: bool,
 ) !void {
     const style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
+    const img_format = termimage.detect(is_terminal, std.posix.isatty(std.posix.STDIN_FILENO));
+    const use_kitty_text_sizing = (img_format == .kitty);
+
     var tr = zchomd.TermRenderer.init(allocator, .{
         .styles = style_cfg,
         .word_wrap = @intCast(word_wrap),
+        .use_kitty_text_sizing = use_kitty_text_sizing,
     });
 
     const rendered: []u8 = blk: {
@@ -177,9 +181,6 @@ fn processContent(
 
         if (is_terminal) {
             if (has_mermaid) {
-                const stdin_is_tty = std.posix.isatty(std.posix.STDIN_FILENO);
-                const img_format = termimage.detect(is_terminal, stdin_is_tty);
-
                 if (img_format != .none) {
                     if (try mermaid.findMmdc(allocator)) |mmdc| {
                         defer allocator.free(mmdc);
