@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        target:
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+          - x86_64-windows-gnu
+          - aarch64-windows-gnu
+          - x86_64-macos
+          - aarch64-macos
+        include:
+          - target: x86_64-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-windows-gnu
+            os: ubuntu-latest
+          - target: aarch64-windows-gnu
+            os: ubuntu-latest
+          - target: x86_64-macos
+            os: macos-latest
+          - target: aarch64-macos
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+      - name: Package
+        shell: bash
+        run: |
+          EXE_NAME="ziglow"
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            EXE_NAME="ziglow.exe"
+            ARCHIVE_NAME="ziglow-${{ matrix.target }}.zip"
+            cp zig-out/bin/$EXE_NAME .
+            zip $ARCHIVE_NAME $EXE_NAME
+          else
+            ARCHIVE_NAME="ziglow-${{ matrix.target }}.tar.gz"
+            cp zig-out/bin/$EXE_NAME .
+            tar -czf $ARCHIVE_NAME $EXE_NAME
+          fi
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARCHIVE_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

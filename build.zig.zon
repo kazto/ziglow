@@ -5,13 +5,16 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .zchomd = .{
-            .path = "../zchomd",
+            .url = "git+https://github.com/kazto/zchomd#80eff5d936b97a9e64d89b22c282e0d6e3e0feb3",
+            .hash = "zchomd-0.1.0-1u20dJ-OAQBlo0AyPuRJTLhlxihRJBMGlffEzXaQcuje",
         },
         .zchomptic = .{
-            .path = "../zchomptic",
+            .url = "git+https://github.com/kazto/zchomptic#a2315669c00e5aecc5ab1ddbbac41462a45cff2f",
+            .hash = "zchomptic-0.1.0-h-Ha5ySRAAD64atQIwvFdRtVamTFX1SgGFqfzlxgE9pL",
         },
         .zcholor = .{
-            .path = "../zcholor",
+            .url = "git+https://github.com/kazto/zcholor#66affdc5de949ec80198aaf8efe8b4ccc6c1c8f4",
+            .hash = "zcholor-0.1.0-fnTlIp_8AABQvKHBGzY8YJaiAarWnG2tZ4w-knUo7X4-",
         },
     },
     .paths = .{
