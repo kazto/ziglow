@@ -1,78 +1,80 @@
 # ziglow
 
-CLIでMarkdownをレンダリングする、Zigによる [charmbracelet/glow](https://github.com/charmbracelet/glow) の再実装。
+A CLI Markdown renderer, re-implementing [charmbracelet/glow](https://github.com/charmbracelet/glow) in Zig.
 
-## 依存モジュール
+![screenshot](./docs/screenshot-readme.png)
 
-| モジュール | 役割 |
+## Dependencies
+
+| Module | Role |
 |---|---|
-| [zchomd](../zchomd) | Markdownパーサー＆ANSIレンダラー (glamour相当) |
-| [zchomptic](../zchomptic) | TUIフレームワーク / Elmアーキテクチャ (bubbletea相当) |
-| [zcholor](../zcholor) | ターミナルスタイリング (lipgloss相当) |
+| [zchomd](https://github.com/kazto/zchomd) | Markdown parser & ANSI renderer (equivalent to glamour) |
+| [zchomptic](https://github.com/kazto/zchomptic) | TUI framework / Elm Architecture (equivalent to bubbletea) |
+| [zcholor](https://github.com/kazto/zcholor) | Terminal styling (equivalent to lipgloss) |
 
-## ビルド
+## Build
 
+```sh
+zig build          # Generates zig-out/bin/ziglow
+zig build run      # Build and run
+zig build test     # Run tests
 ```
-zig build          # zig-out/bin/ziglow を生成
-zig build run      # ビルド＆実行
-zig build test     # テスト実行
-```
 
-必要な Zig バージョン: **0.15.2 以降**
+Required Zig version: **0.15.2 or later**
 
-## 使い方
+## Usage
 
-```
+```sh
 ziglow [OPTIONS] [FILE|DIR|-]
 ```
 
-### 入力ソース
+### Input Sources
 
-| 指定 | 動作 |
+| Specification | Behavior |
 |---|---|
-| `FILE` | 指定した Markdown ファイルをレンダリング |
-| `DIR` | ディレクトリ内の README.md を探してレンダリング |
-| `-` | 標準入力から読み込む |
-| (省略) | stdin がパイプなら stdin、そうでなければカレントディレクトリ |
+| `FILE` | Renders the specified Markdown file. |
+| `DIR` | Searches for `README.md` within the directory and renders it. |
+| `-` | Reads from standard input (stdin). |
+| (omitted) | Reads from stdin if it's a pipe; otherwise, uses the current directory. |
 
-### オプション
+### Options
 
-| オプション | 説明 | デフォルト |
+| Option | Description | Default |
 |---|---|---|
-| `-s`, `--style <name>` | スタイル: `dark` / `light` / `notty` / `auto` | `auto` |
-| `-w`, `--width <n>` | 折り返し幅 (0 = 端末幅、最大120) | 端末幅 |
-| `-p`, `--pager` | `$PAGER` (未設定時は `less -r`) に渡す | — |
-| `-t`, `--tui` | 内蔵TUIページャーで表示 | — |
-| `-h`, `--help` | ヘルプを表示 | — |
-| `-V`, `--version` | バージョンを表示 | — |
+| `-s`, `--style <name>` | Style: `dark` / `light` / `notty` / `auto` | `auto` |
+| `-w`, `--width <n>` | Word-wrap width (0 = terminal width, max 120) | Terminal width |
+| `-p`, `--pager` | Pipe output to `$PAGER` (defaults to `less -r` if unset) | — |
+| `-t`, `--tui` | Use the built-in TUI pager | — |
+| `-h`, `--help` | Show help | — |
+| `-V`, `--version` | Show version | — |
 
-`auto` スタイルは、TTYに出力するとき `dark`、パイプに出力するとき `notty` を自動選択します。
+The `auto` style automatically selects `dark` when outputting to a TTY and `notty` when piped.
 
-## 設定ファイル
+## Configuration File
 
-`ziglow` は以下のパスにある TOML 形式の設定ファイルを読み込みます。
+`ziglow` reads a TOML configuration file from the following paths:
 
 - `$XDG_CONFIG_HOME/ziglow/ziglow.toml`
-- または `~/.config/ziglow/ziglow.toml`
+- or `~/.config/ziglow/ziglow.toml`
 
-起動オプションが指定された場合は、設定ファイルの値よりもオプションが優先されます。
+Command-line options take precedence over values in the configuration file.
 
-### 設定項目
+### Configuration Items
 
-| キー | 説明 | 例 |
+| Key | Description | Example |
 |---|---|---|
-| `style` | デフォルトのスタイル | `"dark"` / `"light"` / `"notty"` / `"auto"` |
-| `width` | 折り返し幅 | `100` |
-| `pager` | 使用する外部ページャー | `"less -R"` |
-| `builtin_tui` | デフォルトで内蔵TUIを使用するか | `true` / `false` |
-| `h1_foreground` | 見出し1の前景色 | `"#1f1f1f"` / `"228"` |
-| `h1_background` | 見出し1の背景色 | `"#a0a0a0"` / `"63"` |
-| `h1_scale` | 見出し1の拡大率（対応端末のみ） | `3.0` |
-| `h2_foreground` | 見出し2の前景色 | `"#1f1f1f"` |
-| `h2_background` | 見出し2の背景色 | `"#a0a0a0"` |
-| `h2_scale` | 見出し2の拡大率（対応端末のみ） | `1.5` |
+| `style` | Default style | `"dark"` / `"light"` / `"notty"` / `"auto"` |
+| `width` | Word-wrap width | `100` |
+| `pager` | External pager to use | `"less -R"` |
+| `builtin_tui` | Whether to use the built-in TUI by default | `true` / `false` |
+| `h1_foreground` | Foreground color for H1 | `"#1f1f1f"` / `"228"` |
+| `h1_background` | Background color for H1 | `"#a0a0a0"` / `"63"` |
+| `h1_scale` | Scale factor for H1 (supported terminals only) | `3.0` |
+| `h2_foreground` | Foreground color for H2 | `"#1f1f1f"` |
+| `h2_background` | Background color for H2 | `"#a0a0a0"` |
+| `h2_scale` | Scale factor for H2 (supported terminals only) | `1.5` |
 
-### 設定例
+### Configuration Example
 
 ```toml
 style = "dark"
@@ -88,53 +90,53 @@ h2_foreground = "#e06c75"
 h2_scale = 1.5
 ```
 
-### 使用例
+### Examples
 
 ```sh
-# ファイルをレンダリング
+# Render a file
 ziglow README.md
 
-# カレントディレクトリの README を表示
+# Show the README in the current directory
 ziglow
 
-# stdin からパイプ
+# Pipe from stdin
 cat CHANGELOG.md | ziglow
 
-# 明示的に stdin を指定
+# Explicitly specify stdin
 ziglow -
 
-# ライトスタイルで幅60
+# Light style with width 60
 ziglow -s light -w 60 README.md
 
-# 外部ページャーで表示
+# Show using an external pager
 ziglow -p README.md
 
-# 内蔵TUIページャーで表示
+# Show using the built-in TUI pager
 ziglow -t README.md
 ```
 
-## TUIページャーのキーバインド
+## TUI Pager Keybindings
 
-| キー | 動作 |
+| Key | Action |
 |---|---|
-| `j` / `↓` | 1行下へ |
-| `k` / `↑` | 1行上へ |
-| `d` / `Ctrl+D` | 半ページ下へ |
-| `u` / `Ctrl+U` | 半ページ上へ |
-| `f` / `Space` / `Ctrl+F` / `PageDown` | 1ページ下へ |
-| `b` / `Ctrl+B` / `PageUp` | 1ページ上へ |
-| `g` / `Home` | 先頭へ |
-| `G` / `End` | 末尾へ |
-| `q` / `Ctrl+C` | 終了 |
+| `j` / `↓` | Scroll down one line |
+| `k` / `↑` | Scroll up one line |
+| `d` / `Ctrl+D` | Scroll down half a page |
+| `u` / `Ctrl+U` | Scroll up half a page |
+| `f` / `Space` / `Ctrl+F` / `PageDown` | Scroll down one page |
+| `b` / `Ctrl+B` / `PageUp` | Scroll up one page |
+| `g` / `Home` | Go to top |
+| `G` / `End` | Go to bottom |
+| `q` / `Ctrl+C` | Quit |
 
-## プロジェクト構成
+## Project Structure
 
 ```
 ziglow/
-├── build.zig          # ビルド定義
-├── build.zig.zon      # 依存関係 (zchomd, zchomptic, zcholor)
+├── build.zig          # Build definition
+├── build.zig.zon      # Dependencies (zchomd, zchomptic, zcholor)
 └── src/
-    ├── main.zig       # CLI エントリポイント、引数解析、レンダリング dispatch
-    ├── tui.zig        # TUI ページャーモデル (zchomptic)
-    └── root.zig       # ライブラリスタブ
+    ├── main.zig       # CLI entry point, argument parsing, rendering dispatch
+    ├── tui.zig        # TUI pager model (zchomptic)
+    └── root.zig       # Library stub
 ```
