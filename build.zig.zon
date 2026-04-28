@@ -9,7 +9,8 @@
             .hash = "zchomd-0.1.0-1u20dJ-OAQBlo0AyPuRJTLhlxihRJBMGlffEzXaQcuje",
         },
         .zchomptic = .{
-            .path = "../zchomptic",
+            .url = "git+https://github.com/kazto/zchomptic#v0.1.2",
+            .hash = "zchomptic-0.1.2-h-Ha5-acAADZ2WoXGcoFTzf8RAvIHpg0x-akneTpQtBr",
         },
         .zcholor = .{
             .url = "git+https://github.com/kazto/zcholor#66affdc5de949ec80198aaf8efe8b4ccc6c1c8f4",
