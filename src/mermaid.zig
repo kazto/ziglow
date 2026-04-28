@@ -69,9 +69,9 @@ pub fn extract(allocator: std.mem.Allocator, md: []const u8, use_markers: bool) 
                             .{ marker_prefix, blocks.items.len },
                         );
                         try markers.append(allocator, marker);
-                        pending = try std.fmt.allocPrint(allocator, "{s}\n", .{marker});
+                        pending = try allocator.dupe(u8, marker);
                     } else {
-                        pending = try allocator.dupe(u8, placeholder ++ "\n");
+                        pending = try allocator.dupe(u8, placeholder);
                     }
                 } else {
                     try out.appendSlice(allocator, line);
@@ -97,6 +97,7 @@ pub fn extract(allocator: std.mem.Allocator, md: []const u8, use_markers: bool) 
                 current.clearRetainingCapacity();
                 if (pending) |p| {
                     try out.appendSlice(allocator, p);
+                    try out.append(allocator, '\n');
                     allocator.free(p);
                     pending = null;
                 }

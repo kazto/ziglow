@@ -67,8 +67,11 @@ pub fn main() !void {
     // --- Auto-detect width ---
     if (width == 0) {
         if (is_terminal) {
-            const sz = zchomptic.terminal.TerminalState.getSize();
-            width = @min(sz.width, 120);
+            var winsize: std.posix.winsize = undefined;
+            const rc = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.system.T.IOCGWINSZ, @intFromPtr(&winsize));
+            if (rc == 0) {
+                width = @min(winsize.col, 120);
+            }
         }
         if (width == 0) width = 80;
     }
