@@ -48,6 +48,46 @@ ziglow [OPTIONS] [FILE|DIR|-]
 
 `auto` スタイルは、TTYに出力するとき `dark`、パイプに出力するとき `notty` を自動選択します。
 
+## 設定ファイル
+
+`ziglow` は以下のパスにある TOML 形式の設定ファイルを読み込みます。
+
+- `$XDG_CONFIG_HOME/ziglow/ziglow.toml`
+- または `~/.config/ziglow/ziglow.toml`
+
+起動オプションが指定された場合は、設定ファイルの値よりもオプションが優先されます。
+
+### 設定項目
+
+| キー | 説明 | 例 |
+|---|---|---|
+| `style` | デフォルトのスタイル | `"dark"` / `"light"` / `"notty"` / `"auto"` |
+| `width` | 折り返し幅 | `100` |
+| `pager` | 使用する外部ページャー | `"less -R"` |
+| `builtin_tui` | デフォルトで内蔵TUIを使用するか | `true` / `false` |
+| `h1_foreground` | 見出し1の前景色 | `"#1f1f1f"` / `"228"` |
+| `h1_background` | 見出し1の背景色 | `"#a0a0a0"` / `"63"` |
+| `h1_scale` | 見出し1の拡大率（対応端末のみ） | `3.0` |
+| `h2_foreground` | 見出し2の前景色 | `"#1f1f1f"` |
+| `h2_background` | 見出し2の背景色 | `"#a0a0a0"` |
+| `h2_scale` | 見出し2の拡大率（対応端末のみ） | `1.5` |
+
+### 設定例
+
+```toml
+style = "dark"
+width = 100
+pager = "less -R"
+builtin_tui = false
+
+h1_foreground = "#282c34"
+h1_background = "#e06c75"
+h1_scale = 3.0
+
+h2_foreground = "#e06c75"
+h2_scale = 1.5
+```
+
 ### 使用例
 
 ```sh
