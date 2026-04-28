@@ -2,6 +2,12 @@
 //! Extraction: scans Markdown for ```mermaid fenced blocks.
 //! Rendering:  delegates to the `mmdc` CLI (Mermaid CLI / Node.js).
 const std = @import("std");
+const builtin = @import("builtin");
+
+fn getenv(name: []const u8) ?[]const u8 {
+    if (builtin.os.tag == .windows) return null;
+    return std.posix.getenv(name);
+}
 
 pub const marker_prefix = "ZIGLOWMERMAID";
 pub const placeholder = "[mermaid diagram omitted]";
@@ -175,10 +181,12 @@ fn stripIndent(line: []const u8) []const u8 {
 
 /// Search PATH for the `mmdc` binary.  Returns an owned path, or null.
 pub fn findMmdc(allocator: std.mem.Allocator) !?[]u8 {
-    const path_env = std.posix.getenv("PATH") orelse return null;
-    var dir_it = std.mem.splitScalar(u8, path_env, ':');
+    const path_env = getenv("PATH") orelse return null;
+    const sep = if (builtin.os.tag == .windows) ';' else ':';
+    var dir_it = std.mem.splitScalar(u8, path_env, sep);
     while (dir_it.next()) |dir| {
-        const full = try std.fs.path.join(allocator, &.{ dir, "mmdc" });
+        const bin_name = if (builtin.os.tag == .windows) "mmdc.cmd" else "mmdc";
+        const full = try std.fs.path.join(allocator, &.{ dir, bin_name });
         errdefer allocator.free(full);
         std.fs.accessAbsolute(full, .{}) catch {
             allocator.free(full);

@@ -8,7 +8,7 @@ const mermaid = @import("mermaid.zig");
 const termimage = @import("termimage.zig");
 const config = @import("config.zig");
 
-const version = "0.2.0";
+const version = "0.2.1";
 
 const readme_names = [_][]const u8{
     "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
@@ -65,17 +65,14 @@ pub fn main() !void {
     }
 
     // --- Terminal detection ---
-    const is_terminal = std.posix.isatty(std.posix.STDOUT_FILENO);
-    const stdin_is_pipe = !std.posix.isatty(std.posix.STDIN_FILENO);
+    const is_terminal = std.fs.File.stdout().isTty();
+    const stdin_is_pipe = !std.fs.File.stdin().isTty();
 
     // --- Auto-detect width ---
     if (width == 0) {
         if (is_terminal) {
-            var winsize: std.posix.winsize = undefined;
-            const rc = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.system.T.IOCGWINSZ, @intFromPtr(&winsize));
-            if (rc == 0) {
-                width = @min(winsize.col, 120);
-            }
+            const size = zchomptic.terminal.TerminalState.getSize();
+            width = @min(@as(u32, @intCast(size.width)), 120);
         }
         if (width == 0) width = 80;
     }
@@ -178,7 +175,7 @@ fn processContent(
     var style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
     config.applyConfigToStyle(conf, &style_cfg);
 
-    const img_format = termimage.detect(is_terminal, std.posix.isatty(std.posix.STDIN_FILENO));
+    const img_format = termimage.detect(is_terminal, std.fs.File.stdin().isTty());
     const use_kitty_text_sizing = (img_format == .kitty);
 
     var tr = zchomd.TermRenderer.init(allocator, .{
@@ -243,7 +240,15 @@ fn processContent(
     if (use_tui) {
         try tui.runPager(allocator, rendered);
     } else if (use_pager) {
-        const pager_cmd = conf.pager orelse std.posix.getenv("PAGER") orelse "less -R";
+        const pager_cmd = conf.pager orelse std.process.getEnvVarOwned(allocator, "PAGER") catch |err| blk: {
+            if (err == error.EnvironmentVariableNotFound) break :blk "less -R";
+            return err;
+        };
+        if (conf.pager == null and std.mem.eql(u8, pager_cmd, "less -R")) {
+            // pager_cmd is already "less -R"
+        } else {
+            defer if (conf.pager == null) allocator.free(@constCast(pager_cmd));
+        }
         try runExternalPager(allocator, rendered, pager_cmd);
     } else {
         try std.fs.File.stdout().writeAll(rendered);

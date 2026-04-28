@@ -1,6 +1,12 @@
 //! Terminal image format detection and encoding.
 //! Supports iTerm2 inline images, Kitty graphics protocol, and Sixel graphics.
 const std = @import("std");
+const builtin = @import("builtin");
+
+fn getenv(name: []const u8) ?[]const u8 {
+    if (builtin.os.tag == .windows) return null;
+    return std.posix.getenv(name);
+}
 
 pub const Format = enum { none, iterm2, kitty, sixel };
 
@@ -10,9 +16,9 @@ pub fn detect(stdout_is_tty: bool, stdin_is_tty: bool) Format {
     if (!stdout_is_tty) return .none;
 
     // Explicit override.
-    if (std.posix.getenv("ZIGLOW_SIXEL")) |v|
+    if (getenv("ZIGLOW_SIXEL")) |v|
         if (std.mem.eql(u8, v, "1")) return .sixel;
-    if (std.posix.getenv("GLOWM_SIXEL")) |v|
+    if (getenv("GLOWM_SIXEL")) |v|
         if (std.mem.eql(u8, v, "1")) return .sixel;
 
     if (isIterm2()) return .iterm2;
@@ -26,20 +32,21 @@ pub fn detect(stdout_is_tty: bool, stdin_is_tty: bool) Format {
 }
 
 fn isIterm2() bool {
-    const tp = std.posix.getenv("TERM_PROGRAM") orelse return false;
+    const tp = getenv("TERM_PROGRAM") orelse return false;
     return std.mem.eql(u8, tp, "iTerm.app");
 }
 
 fn isKitty() bool {
-    if (std.posix.getenv("KITTY_WINDOW_ID") != null) return true;
-    const term = std.posix.getenv("TERM") orelse return false;
+    if (getenv("KITTY_WINDOW_ID") != null) return true;
+    const term = getenv("TERM") orelse return false;
     return std.mem.indexOf(u8, term, "xterm-kitty") != null;
 }
 
 fn isKnownSixelTerminal() bool {
-    if (std.posix.getenv("TERM_PROGRAM")) |tp|
+    if (builtin.os.tag == .windows) return false;
+    if (getenv("TERM_PROGRAM")) |tp|
         if (std.mem.eql(u8, tp, "WezTerm")) return true;
-    if (std.posix.getenv("TERM")) |t| {
+    if (getenv("TERM")) |t| {
         const known = [_][]const u8{ "mlterm", "yaft-256color", "foot", "foot-direct", "contour" };
         for (known) |name| if (std.mem.eql(u8, t, name)) return true;
     }
@@ -48,6 +55,7 @@ fn isKnownSixelTerminal() bool {
 
 /// Query the terminal via DA1 (Primary Device Attributes) to check for Sixel support.
 fn querySixelViaDA1() bool {
+    if (builtin.os.tag == .windows) return false;
     const stdin_handle = std.posix.STDIN_FILENO;
     const stdout_handle = std.posix.STDOUT_FILENO;
 

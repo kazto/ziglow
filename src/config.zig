@@ -26,18 +26,37 @@ pub const Config = struct {
 pub fn loadConfig(allocator: std.mem.Allocator) !Config {
     var conf = Config{};
 
-    const home = std.posix.getenv("HOME") orelse return conf;
-    const xdg_config_home = std.posix.getenv("XDG_CONFIG_HOME");
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| blk: {
+        if (err == error.EnvironmentVariableNotFound) {
+            if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |up| {
+                break :blk up;
+            } else |_| {
+                return conf;
+            }
+        }
+        return err;
+    };
+    defer allocator.free(home);
 
+    const xdg_config_home = std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME") catch |err| blk: {
+        if (err == error.EnvironmentVariableNotFound) break :blk null;
+        return err;
+    };
+    defer if (xdg_config_home) |v| allocator.free(v);
+
+    const builtin = @import("builtin");
     var path_buf: [1024]u8 = undefined;
     const config_path = if (xdg_config_home) |xdg|
         try std.fmt.bufPrint(&path_buf, "{s}/ziglow/ziglow.toml", .{xdg})
+    else if (builtin.os.tag == .windows)
+        try std.fmt.bufPrint(&path_buf, "{s}/AppData/Roaming/ziglow/ziglow.toml", .{home})
     else
         try std.fmt.bufPrint(&path_buf, "{s}/.config/ziglow/ziglow.toml", .{home});
 
     const file = std.fs.openFileAbsolute(config_path, .{}) catch |err| {
         if (err == error.FileNotFound) return conf;
-        return err;
+        // On Windows, try AppData/Local as well? No, standard is Roaming for config.
+        return conf;
     };
     defer file.close();
 
