@@ -137,6 +137,8 @@ ziglow/
 ├── build.zig.zon      # Dependencies (zchomd, zchomptic, zcholor)
 └── src/
     ├── main.zig       # CLI entry point, argument parsing, rendering dispatch
+    ├── config.zig     # Configuration file loading (TOML) and management
     ├── tui.zig        # TUI pager model (zchomptic)
-    └── root.zig       # Library stub
+    ├── mermaid.zig    # Mermaid diagram rendering integration
+    ├── termimage.zig  # Terminal image rendering (Sixel/Kitty support)
 ```

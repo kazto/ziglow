@@ -13,12 +13,6 @@ pub fn build(b: *std.Build) void {
     const zchomptic_mod = zchomptic_dep.module("zchomptic");
     const zcholor_mod = zcholor_dep.module("zcholor");
 
-    // Library module (exposed to consumers)
-    const mod = b.addModule("ziglow", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-    });
-
     // Executable
     const exe = b.addExecutable(.{
         .name = "ziglow",
@@ -27,7 +21,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "ziglow", .module = mod },
                 .{ .name = "zchomd", .module = zchomd_mod },
                 .{ .name = "zchomptic", .module = zchomptic_mod },
                 .{ .name = "zcholor", .module = zcholor_mod },
@@ -47,17 +40,11 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Tests
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
-    });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
