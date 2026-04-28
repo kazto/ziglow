@@ -26,8 +26,11 @@ pub const Config = struct {
 pub fn loadConfig(allocator: std.mem.Allocator) !Config {
     var conf = Config{};
 
-    const home = std.posix.getenv("HOME") orelse return conf;
-    const xdg_config_home = std.posix.getenv("XDG_CONFIG_HOME");
+    var env = try std.process.getEnvMap(allocator);
+    defer env.deinit();
+
+    const home = env.get("HOME") orelse return conf;
+    const xdg_config_home = env.get("XDG_CONFIG_HOME");
 
     var path_buf: [1024]u8 = undefined;
     const config_path = if (xdg_config_home) |xdg|

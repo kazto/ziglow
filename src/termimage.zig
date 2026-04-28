@@ -1,23 +1,35 @@
 //! Terminal image format detection and encoding.
 //! Supports iTerm2 inline images, Kitty graphics protocol, and Sixel graphics.
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Format = enum { none, iterm2, kitty, sixel };
+
+/// Minimal wrapper for getenv for portability.
+pub fn getEnv(name: []const u8) ?[]const u8 {
+    if (builtin.os.tag == .windows) {
+        // Simple stub for Windows for now to avoid complexity of UTF-16 conversion.
+        return null;
+    }
+    return std.posix.getenv(name);
+}
 
 /// Detect the terminal's inline image capability.
 /// Pass whether stdout and stdin are TTYs.
 pub fn detect(stdout_is_tty: bool, stdin_is_tty: bool) Format {
     if (!stdout_is_tty) return .none;
 
-    // Explicit override.
-    if (std.posix.getenv("ZIGLOW_SIXEL")) |v|
-        if (std.mem.eql(u8, v, "1")) return .sixel;
-    if (std.posix.getenv("GLOWM_SIXEL")) |v|
-        if (std.mem.eql(u8, v, "1")) return .sixel;
+    if (builtin.os.tag != .windows) {
+        // Explicit override.
+        if (std.posix.getenv("ZIGLOW_SIXEL")) |v|
+            if (std.mem.eql(u8, v, "1")) return .sixel;
+        if (std.posix.getenv("GLOWM_SIXEL")) |v|
+            if (std.mem.eql(u8, v, "1")) return .sixel;
 
-    if (isIterm2()) return .iterm2;
-    if (isKitty()) return .kitty;
-    if (isKnownSixelTerminal()) return .sixel;
+        if (isIterm2()) return .iterm2;
+        if (isKitty()) return .kitty;
+        if (isKnownSixelTerminal()) return .sixel;
+    }
 
     // Query terminal via DA1 (Device Attributes) if stdin is available.
     if (stdin_is_tty and querySixelViaDA1()) return .sixel;
@@ -48,8 +60,9 @@ fn isKnownSixelTerminal() bool {
 
 /// Query the terminal via DA1 (Primary Device Attributes) to check for Sixel support.
 fn querySixelViaDA1() bool {
+    if (builtin.os.tag == .windows) return false;
+
     const stdin_handle = std.posix.STDIN_FILENO;
-    const stdout_handle = std.posix.STDOUT_FILENO;
 
     // Save terminal state and enter raw mode.
     const termios = std.posix.tcgetattr(stdin_handle) catch return false;
@@ -65,10 +78,10 @@ fn querySixelViaDA1() bool {
     defer std.posix.tcsetattr(stdin_handle, .FLUSH, termios) catch {};
 
     // Send Primary Device Attributes query.
-    _ = std.posix.write(stdout_handle, "\x1b[c") catch return false;
+    _ = std.fs.File.stdout().write("\x1b[c") catch return false;
 
     var buf: [64]u8 = undefined;
-    const n = std.posix.read(stdin_handle, &buf) catch return false;
+    const n = std.fs.File.stdin().read(&buf) catch return false;
     if (n == 0) return false;
 
     return parseSixelSupport(buf[0..n]);
@@ -166,6 +179,8 @@ fn encodeKitty(allocator: std.mem.Allocator, png: []const u8, width_cells: u32) 
 
 /// Encode PNG as Sixel by spawning img2sixel or ImageMagick convert.
 fn encodeSixel(allocator: std.mem.Allocator, png: []const u8) !?[]u8 {
+    if (builtin.os.tag == .windows) return null;
+
     const ts: u64 = @bitCast(std.time.milliTimestamp());
     const tmp = try std.fmt.allocPrint(allocator, "/tmp/ziglow_six_{x}.png", .{ts});
     defer allocator.free(tmp);

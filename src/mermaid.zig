@@ -2,6 +2,7 @@
 //! Extraction: scans Markdown for ```mermaid fenced blocks.
 //! Rendering:  delegates to the `mmdc` CLI (Mermaid CLI / Node.js).
 const std = @import("std");
+const termimage = @import("termimage.zig");
 
 pub const marker_prefix = "ZIGLOWMERMAID";
 pub const placeholder = "[mermaid diagram omitted]";
@@ -175,8 +176,8 @@ fn stripIndent(line: []const u8) []const u8 {
 
 /// Search PATH for the `mmdc` binary.  Returns an owned path, or null.
 pub fn findMmdc(allocator: std.mem.Allocator) !?[]u8 {
-    const path_env = std.posix.getenv("PATH") orelse return null;
-    var dir_it = std.mem.splitScalar(u8, path_env, ':');
+    const path_env = termimage.getEnv("PATH") orelse return null;
+    var dir_it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
     while (dir_it.next()) |dir| {
         const full = try std.fs.path.join(allocator, &.{ dir, "mmdc" });
         errdefer allocator.free(full);

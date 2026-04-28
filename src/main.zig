@@ -1,6 +1,7 @@
 //! ziglow — Render markdown on the CLI, with pizzazz!
 //! Zig re-implementation of charmbracelet/glow.
 const std = @import("std");
+const builtin = @import("builtin");
 const zchomd = @import("zchomd");
 const zchomptic = @import("zchomptic");
 const tui = @import("tui.zig");
@@ -65,17 +66,14 @@ pub fn main() !void {
     }
 
     // --- Terminal detection ---
-    const is_terminal = std.posix.isatty(std.posix.STDOUT_FILENO);
-    const stdin_is_pipe = !std.posix.isatty(std.posix.STDIN_FILENO);
+    const is_terminal = std.fs.File.stdout().isTty();
+    const stdin_is_pipe = !std.fs.File.stdin().isTty();
 
     // --- Auto-detect width ---
     if (width == 0) {
         if (is_terminal) {
-            var winsize: std.posix.winsize = undefined;
-            const rc = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.system.T.IOCGWINSZ, @intFromPtr(&winsize));
-            if (rc == 0) {
-                width = @min(winsize.col, 120);
-            }
+            const size = zchomptic.terminal.TerminalState.getSize();
+            width = @min(size.width, 120);
         }
         if (width == 0) width = 80;
     }
@@ -178,7 +176,7 @@ fn processContent(
     var style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
     config.applyConfigToStyle(conf, &style_cfg);
 
-    const img_format = termimage.detect(is_terminal, std.posix.isatty(std.posix.STDIN_FILENO));
+    const img_format = termimage.detect(is_terminal, std.fs.File.stdin().isTty());
     const use_kitty_text_sizing = (img_format == .kitty);
 
     var tr = zchomd.TermRenderer.init(allocator, .{
@@ -243,7 +241,8 @@ fn processContent(
     if (use_tui) {
         try tui.runPager(allocator, rendered);
     } else if (use_pager) {
-        const pager_cmd = conf.pager orelse std.posix.getenv("PAGER") orelse "less -R";
+        const default_pager = if (builtin.os.tag == .windows) "more" else "less -R";
+        const pager_cmd = conf.pager orelse termimage.getEnv("PAGER") orelse default_pager;
         try runExternalPager(allocator, rendered, pager_cmd);
     } else {
         try std.fs.File.stdout().writeAll(rendered);
