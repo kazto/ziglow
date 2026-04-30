@@ -4,6 +4,11 @@ A CLI Markdown renderer, re-implementing [charmbracelet/glow](https://github.com
 
 ![screenshot](./docs/screenshot-readme.png)
 
+## Features
+
+- **Markdown Rendering**: Render Markdown files directly in your terminal with rich styling.
+- **Mermaid Support**: Render Mermaid diagrams using Sixel graphics (requires a Sixel-compatible terminal).
+
 ## Dependencies
 
 | Module | Role |
