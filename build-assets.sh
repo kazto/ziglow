@@ -27,7 +27,3 @@ do
         tar --zstd -cf "dist/ziglow-${version}-${arch}-${os}.tar.zst" -C zig-out/bin "$bin_name"
     done
 done
-
-# gh でリリース
-echo "Creating GitHub release v${version}..."
-gh release create "v${version}" dist/*.tar.zst --title "v${version}" --generate-notes
