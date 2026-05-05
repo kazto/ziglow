@@ -1,6 +1,6 @@
 .{
     .name = .ziglow,
-    .version = "0.3.0",
+    .version = "0.3.1",
     .fingerprint = 0x4461f431d59bcb2d, // Changing this has security and trust implications.
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
@@ -9,8 +9,8 @@
             .hash = "zchomd-0.1.0-1u20dJ-OAQBlo0AyPuRJTLhlxihRJBMGlffEzXaQcuje",
         },
         .zchomptic = .{
-            .url = "git+https://github.com/kazto/zchomptic#v0.1.2",
-            .hash = "zchomptic-0.1.2-h-Ha5-acAADZ2WoXGcoFTzf8RAvIHpg0x-akneTpQtBr",
+            .url = "git+https://github.com/kazto/zchomptic.git#dfb530013925067581113729b86017864a70b54d",
+            .hash = "zchomptic-0.1.3-h-Ha50KdAACSsyEcn3cnkYGFLULgHtUMCzrVame4ynTI",
         },
         .zcholor = .{
             .url = "git+https://github.com/kazto/zcholor#66affdc5de949ec80198aaf8efe8b4ccc6c1c8f4",

@@ -62,13 +62,13 @@ pub const Pager = struct {
         const total = self.lines.items.len;
         const end = @min(self.offset + self.height, total);
         for (self.lines.items[self.offset..end]) |line| {
-            try writer.print("{s}\n", .{line});
+            try writer.print("{s}\x1b[K\r\n", .{line});
         }
         // Status bar
         const bottom = @min(self.offset + self.height, total);
         const pct: u32 = if (total == 0) 100 else @intCast(@min(100, bottom * 100 / total));
         try writer.print(
-            "-- {d}/{d} ({d}%) -- j/k:scroll  d/u:half-page  g/G:top/bottom  q:quit",
+            "\r\x1b[K-- {d}/{d} ({d}%) -- j/k:scroll  d/u:half-page  g/G:top/bottom  q:quit",
             .{ bottom, total, pct },
         );
     }
@@ -93,16 +93,25 @@ pub const Pager = struct {
 
 /// Run the TUI pager displaying `content` (pre-rendered ANSI text).
 pub fn runPager(allocator: std.mem.Allocator, content: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // Enter alternate screen, clear, and disable autowrap
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll("\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H");
+    defer stdout.writeAll("\x1b[?7h\x1b[?1049l") catch {};
+
     const sz = zchomptic.terminal.TerminalState.getSize();
     const height: usize = if (sz.height > 2) @as(usize, sz.height) - 1 else 10;
 
     var lines: std.ArrayList([]const u8) = .empty;
-    defer lines.deinit(allocator);
+    defer lines.deinit(aa);
 
     // Split rendered content into lines (slices point into `content`).
     var iter = std.mem.splitScalar(u8, content, '\n');
     while (iter.next()) |line| {
-        try lines.append(allocator, line);
+        try lines.append(aa, line);
     }
     // Trim trailing blank lines.
     while (lines.items.len > 0 and lines.getLast().len == 0) {
@@ -111,12 +120,16 @@ pub fn runPager(allocator: std.mem.Allocator, content: []const u8) !void {
 
     var pager = Pager{
         .lines = lines,
-        .allocator = allocator,
+        .allocator = aa,
         .offset = 0,
         .height = height,
     };
 
-    var prog = zchomptic.Program.init(allocator, zchomptic.model(&pager));
-    defer prog.deinit();
+    var prog = zchomptic.Program.init(aa, zchomptic.model(&pager));
+    defer {
+        prog.deinit();
+        // Give background thread a moment to exit before we nukes its memory.
+        std.Thread.sleep(150 * std.time.ns_per_ms);
+    }
     try prog.run();
 }

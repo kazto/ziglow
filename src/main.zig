@@ -14,13 +14,14 @@ const version = "0.2.0";
 const readme_names = [_][]const u8{
     "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
 };
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var conf = try config.loadConfig(allocator);
+    // ...
+
     defer conf.deinit(allocator);
 
     const argv = try std.process.argsAlloc(allocator);
@@ -74,6 +75,7 @@ pub fn main() !void {
         if (is_terminal) {
             const size = zchomptic.terminal.TerminalState.getSize();
             width = @min(size.width, 120);
+            if (use_tui and width > 1) width -= 1;
         }
         if (width == 0) width = 80;
     }
