@@ -9,7 +9,7 @@ const mermaid = @import("mermaid.zig");
 const termimage = @import("termimage.zig");
 const config = @import("config.zig");
 
-const version = "0.2.0";
+const version = "0.4.0";
 
 const readme_names = [_][]const u8{
     "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
