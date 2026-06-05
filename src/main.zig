@@ -7,6 +7,7 @@ const zchomptic = @import("zchomptic");
 const tui = @import("tui.zig");
 const mermaid = @import("mermaid.zig");
 const termimage = @import("termimage.zig");
+const image = @import("image.zig");
 const config = @import("config.zig");
 
 const version = "0.4.0";
