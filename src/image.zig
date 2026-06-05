@@ -51,3 +51,51 @@ test "isUrl detects remote / non-local schemes" {
     try std.testing.expect(!isUrl("/abs/local.png"));
     try std.testing.expect(!isUrl("C:\\imgs\\local.png"));
 }
+
+/// If the trimmed `line` is exactly one Markdown image `![alt](dest)` and
+/// nothing else, return the destination (title and surrounding `<>` stripped).
+/// Otherwise null. Only standalone image lines are eligible.
+fn parseStandaloneImage(line: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, line, " \t\r\n");
+    if (!std.mem.startsWith(u8, t, "![")) return null;
+    if (t.len == 0 or t[t.len - 1] != ')') return null; // nothing after the image
+
+    const close_alt = std.mem.indexOf(u8, t, "](") orelse return null;
+    var dest = std.mem.trim(u8, t[close_alt + 2 .. t.len - 1], " \t");
+    dest = stripTitle(dest);
+    if (dest.len >= 2 and dest[0] == '<' and dest[dest.len - 1] == '>') {
+        dest = dest[1 .. dest.len - 1];
+    }
+    dest = std.mem.trim(u8, dest, " \t");
+    if (dest.len == 0) return null;
+    return dest;
+}
+
+/// Strip a trailing `"title"` / `'title'` (separated from the dest by
+/// whitespace) from a link destination. Returns `dest` unchanged otherwise.
+fn stripTitle(dest: []const u8) []const u8 {
+    const trimmed = std.mem.trimRight(u8, dest, " \t");
+    if (trimmed.len < 2) return trimmed;
+    const quote = trimmed[trimmed.len - 1];
+    if (quote != '"' and quote != '\'') return trimmed;
+    const open = std.mem.lastIndexOfScalar(u8, trimmed[0 .. trimmed.len - 1], quote) orelse return trimmed;
+    if (open == 0) return trimmed;
+    if (trimmed[open - 1] != ' ' and trimmed[open - 1] != '\t') return trimmed;
+    return std.mem.trimRight(u8, trimmed[0..open], " \t");
+}
+
+test "parseStandaloneImage extracts dest from a lone image line" {
+    try std.testing.expectEqualStrings("a.png", parseStandaloneImage("![alt](a.png)").?);
+    try std.testing.expectEqualStrings("a.png", parseStandaloneImage("  ![](a.png)  ").?);
+    try std.testing.expectEqualStrings("a.png", parseStandaloneImage("![cap](a.png \"title\")").?);
+    try std.testing.expectEqualStrings("a.png", parseStandaloneImage("![cap](a.png 'title')").?);
+    try std.testing.expectEqualStrings("a b.png", parseStandaloneImage("![x](<a b.png>)").?);
+}
+
+test "parseStandaloneImage rejects non-standalone or non-image lines" {
+    try std.testing.expect(parseStandaloneImage("text ![a](a.png) more") == null);
+    try std.testing.expect(parseStandaloneImage("![a](a.png) trailing") == null);
+    try std.testing.expect(parseStandaloneImage("a link [x](y)") == null);
+    try std.testing.expect(parseStandaloneImage("just text") == null);
+    try std.testing.expect(parseStandaloneImage("![empty]()") == null);
+}
