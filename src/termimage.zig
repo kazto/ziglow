@@ -60,7 +60,19 @@ fn isIterm2(allocator: std.mem.Allocator) bool {
 
 fn isKitty(allocator: std.mem.Allocator) bool {
     if (envExists(allocator, "KITTY_WINDOW_ID")) return true;
+    if (getEnv(allocator, "TERM_PROGRAM")) |term_program| {
+        defer allocator.free(term_program);
+        if (isEchoesTermProgram(term_program)) return true;
+    }
     return envContains(allocator, "TERM", "xterm-kitty");
+}
+
+fn isEchoesTermProgram(term_program: []const u8) bool {
+    return std.mem.eql(u8, term_program, "Echoes");
+}
+
+test "TERM_PROGRAM Echoes enables Kitty-compatible handling" {
+    try std.testing.expect(isEchoesTermProgram("Echoes"));
 }
 
 fn isKnownSixelTerminal(allocator: std.mem.Allocator) bool {
