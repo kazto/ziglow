@@ -202,7 +202,13 @@ pub fn extract(allocator: std.mem.Allocator, md: []const u8, base_dir: ?[]const 
                     return e;
                 };
                 try markers.append(allocator, marker);
-                try paths.append(allocator, resolved);
+                // `resolved` is not yet owned by the list; free it if this append
+                // fails (OOM) so it doesn't leak. `marker` is already in `markers`,
+                // owned by the outer errdefer.
+                paths.append(allocator, resolved) catch |e| {
+                    allocator.free(resolved);
+                    return e;
+                };
                 // Emit the marker as its own block (blank lines guarantee zchomd
                 // renders it on a line by itself so replaceMarkers can match it).
                 try out.append(allocator, '\n');
