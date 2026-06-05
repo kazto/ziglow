@@ -115,7 +115,7 @@ pub fn main() !void {
         // Piped stdin
         const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, conf);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, null, conf);
         return;
     }
 
@@ -124,7 +124,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, path, "-")) {
         const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, conf);
+        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, null, conf);
         return;
     }
 
@@ -183,7 +183,101 @@ fn processFile(
     const content = try file.readToEndAlloc(allocator, 50 * 1024 * 1024);
     defer allocator.free(content);
 
-    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal, conf);
+    const base_dir = std.fs.path.dirname(path);
+    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal, base_dir, conf);
+}
+
+/// Read an image file for inline display. Returns null (caller keeps the marker
+/// line) on any open/read failure or oversize file.
+fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const f = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer f.close();
+    return f.readToEndAlloc(allocator, 32 * 1024 * 1024) catch null;
+}
+
+/// Render `content` for a TTY, substituting mermaid diagrams and standalone
+/// local images with inline graphics. Merges both marker sets and calls
+/// `replaceMarkers` once. Returns an owned rendered string.
+fn renderTerminal(
+    allocator: std.mem.Allocator,
+    tr: *zchomd.TermRenderer,
+    content: []const u8,
+    has_mermaid: bool,
+    img_format: termimage.Format,
+    word_wrap: u32,
+    base_dir: ?[]const u8,
+) ![]u8 {
+    // No image-capable terminal: render as-is (mermaid shows as a code block).
+    if (img_format == .none) return tr.renderAlloc(content);
+
+    // ── Stage 1: mermaid extraction (optional) ──
+    var mermaid_markers: []const []const u8 = &.{};
+    var mermaid_pngs: []?[]u8 = &.{};
+    var mres: ?mermaid.MermaidResult = null;
+    defer if (mres) |*r| r.deinit(allocator);
+    var pngs: ?[]?[]u8 = null;
+    defer if (pngs) |p| {
+        for (p) |x| if (x) |b| allocator.free(b);
+        allocator.free(p);
+    };
+
+    var md1: []const u8 = content;
+    if (has_mermaid) {
+        if (try mermaid.findMmdc(allocator)) |mmdc| {
+            defer allocator.free(mmdc);
+            var r = try mermaid.extract(allocator, content, true);
+            if (r.blocks.len > 0) {
+                pngs = try mermaid.renderPNGs(allocator, r.blocks, mmdc);
+                mermaid_pngs = pngs.?;
+                mermaid_markers = r.markers;
+                md1 = r.markdown;
+                mres = r;
+            } else {
+                r.deinit(allocator);
+            }
+        }
+    }
+
+    // ── Stage 2: image extraction ──
+    var img = try image.extract(allocator, md1, base_dir);
+    defer img.deinit(allocator);
+
+    // ── Render the fully-substituted markdown ──
+    const md_rendered = try tr.renderAlloc(img.markdown);
+    defer allocator.free(md_rendered);
+
+    // Fast path: nothing to substitute.
+    if (mermaid_markers.len == 0 and img.markers.len == 0) {
+        return allocator.dupe(u8, md_rendered);
+    }
+
+    // ── Read image files into bytes (null on failure) ──
+    const img_bytes = try allocator.alloc(?[]u8, img.paths.len);
+    defer {
+        for (img_bytes) |b| if (b) |v| allocator.free(v);
+        allocator.free(img_bytes);
+    }
+    for (img.paths, 0..) |p, i| img_bytes[i] = readImageFile(allocator, p);
+
+    // ── Merge marker + image sets and substitute once ──
+    var all_markers: std.ArrayList([]const u8) = .empty;
+    defer all_markers.deinit(allocator);
+    var all_images: std.ArrayList(?[]u8) = .empty;
+    defer all_images.deinit(allocator);
+
+    for (mermaid_markers) |m| try all_markers.append(allocator, m);
+    for (mermaid_pngs) |p| try all_images.append(allocator, p);
+    for (img.markers) |m| try all_markers.append(allocator, m);
+    for (img_bytes) |b| try all_images.append(allocator, b);
+
+    return termimage.replaceMarkers(
+        allocator,
+        md_rendered,
+        all_markers.items,
+        all_images.items,
+        img_format,
+        word_wrap,
+    );
 }
 
 /// Render `content` as Markdown and output it.
@@ -196,6 +290,7 @@ fn processContent(
     use_pager: bool,
     use_tui: bool,
     is_terminal: bool,
+    base_dir: ?[]const u8,
     conf: config.Config,
 ) !void {
     const normalized_content = try normalizeMarkdownLineEndings(allocator, content);
@@ -217,52 +312,16 @@ fn processContent(
         const has_mermaid = std.mem.indexOf(u8, normalized_content, "```mermaid") != null;
 
         if (is_terminal) {
-            if (has_mermaid) {
-                if (img_format != .none) {
-                    if (try mermaid.findMmdc(allocator)) |mmdc| {
-                        defer allocator.free(mmdc);
-
-                        // ── Full pipeline: extract → render diagrams → render MD → inject ──
-                        var result = try mermaid.extract(allocator, normalized_content, true);
-                        defer result.deinit(allocator);
-
-                        if (result.blocks.len > 0) {
-                            const pngs = try mermaid.renderPNGs(allocator, result.blocks, mmdc);
-                            defer {
-                                for (pngs) |p| if (p) |bytes| allocator.free(bytes);
-                                allocator.free(pngs);
-                            }
-
-                            const md_rendered = try tr.renderAlloc(result.markdown);
-                            defer allocator.free(md_rendered);
-
-                            const pngs_const: []const ?[]u8 = pngs;
-                            const markers_const: []const []const u8 = result.markers;
-
-                            break :blk try termimage.replaceMarkers(
-                                allocator,
-                                md_rendered,
-                                markers_const,
-                                pngs_const,
-                                img_format,
-                                word_wrap,
-                            );
-                        }
-                    }
-                }
-            }
-            // TTY fallback: render original content (shows mermaid as code block).
-            break :blk try tr.renderAlloc(normalized_content);
-        } else {
-            // Piped output: replace mermaid blocks with placeholder text.
-            if (has_mermaid) {
-                var result = try mermaid.extract(allocator, normalized_content, false);
-                defer result.deinit(allocator);
-                break :blk try tr.renderAlloc(result.markdown);
-            } else {
-                break :blk try tr.renderAlloc(normalized_content);
-            }
+            break :blk try renderTerminal(allocator, &tr, normalized_content, has_mermaid, img_format, word_wrap, base_dir);
         }
+
+        // Piped output: replace mermaid blocks with placeholder text.
+        if (has_mermaid) {
+            var result = try mermaid.extract(allocator, normalized_content, false);
+            defer result.deinit(allocator);
+            break :blk try tr.renderAlloc(result.markdown);
+        }
+        break :blk try tr.renderAlloc(normalized_content);
     };
     defer allocator.free(rendered);
 
