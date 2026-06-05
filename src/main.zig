@@ -212,7 +212,7 @@ fn renderTerminal(
 
     // ── Stage 1: mermaid extraction (optional) ──
     var mermaid_markers: []const []const u8 = &.{};
-    var mermaid_pngs: []?[]u8 = &.{};
+    var mermaid_pngs: []const ?[]u8 = &.{};
     var mres: ?mermaid.MermaidResult = null;
     defer if (mres) |*r| r.deinit(allocator);
     var pngs: ?[]?[]u8 = null;
@@ -227,11 +227,13 @@ fn renderTerminal(
             defer allocator.free(mmdc);
             var r = try mermaid.extract(allocator, content, true);
             if (r.blocks.len > 0) {
+                // Transfer ownership to `mres` BEFORE any further fallible call,
+                // so the outer defer frees `r` if `renderPNGs` errors.
+                mres = r;
                 pngs = try mermaid.renderPNGs(allocator, r.blocks, mmdc);
                 mermaid_pngs = pngs.?;
                 mermaid_markers = r.markers;
                 md1 = r.markdown;
-                mres = r;
             } else {
                 r.deinit(allocator);
             }
