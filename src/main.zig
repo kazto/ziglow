@@ -19,6 +19,18 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // We emit UTF-8 (box-drawing, bullets, …). On Windows the console/ConPTY
+    // otherwise decodes our bytes with the legacy OEM code page (e.g. CP932),
+    // turning "•" into mojibake. Tell it our output is UTF-8. The extern and
+    // call live inside this comptime-Windows branch, so nothing Windows-specific
+    // is compiled on macOS/Linux.
+    if (comptime builtin.os.tag == .windows) {
+        const kernel32 = struct {
+            extern "kernel32" fn SetConsoleOutputCP(wCodePageID: std.os.windows.UINT) callconv(.winapi) std.os.windows.BOOL;
+        };
+        _ = kernel32.SetConsoleOutputCP(65001); // CP_UTF8
+    }
+
     var conf = try config.loadConfig(allocator);
     // ...
 
