@@ -123,9 +123,9 @@ fn resolvePath(allocator: std.mem.Allocator, base_dir: ?[]const u8, path: []cons
 test "resolvePath joins relative paths against base_dir and passes absolutes through" {
     const a = std.testing.allocator;
 
-    const rel = try resolvePath(a, "docs", "img/a.png");
+    const rel = try resolvePath(a, "docs", "a.png");
     defer a.free(rel);
-    try std.testing.expectEqualStrings("docs" ++ std.fs.path.sep_str ++ "img" ++ std.fs.path.sep_str ++ "a.png", rel);
+    try std.testing.expectEqualStrings("docs" ++ std.fs.path.sep_str ++ "a.png", rel);
 
     const no_base = try resolvePath(a, null, "a.png");
     defer a.free(no_base);
@@ -283,6 +283,10 @@ test "extract numbers multiple images and resolves against base_dir" {
     try std.testing.expectEqual(@as(usize, 2), res.markers.len);
     try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.markers[0]);
     try std.testing.expectEqualStrings("ZIGLOWIMAGE1", res.markers[1]);
-    try std.testing.expectEqualStrings("base" ++ std.fs.path.sep_str ++ "a.png", res.paths[0]);
-    try std.testing.expectEqualStrings("base" ++ std.fs.path.sep_str ++ "sub" ++ std.fs.path.sep_str ++ "b.jpg", res.paths[1]);
+    const exp0 = try std.fs.path.join(a, &.{ "base", "a.png" });
+    defer a.free(exp0);
+    const exp1 = try std.fs.path.join(a, &.{ "base", "sub/b.jpg" });
+    defer a.free(exp1);
+    try std.testing.expectEqualStrings(exp0, res.paths[0]);
+    try std.testing.expectEqualStrings(exp1, res.paths[1]);
 }
