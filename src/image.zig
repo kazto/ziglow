@@ -125,3 +125,153 @@ test "resolvePath joins relative paths against base_dir and passes absolutes thr
     defer a.free(abs);
     try std.testing.expectEqualStrings(abs_input, abs);
 }
+
+pub const ImageResult = struct {
+    /// Markdown with each standalone image line replaced by its marker.
+    markdown: []u8,
+    /// Marker strings (parallel to `paths`).
+    markers: [][]u8,
+    /// Resolved local file paths (parallel to `markers`).
+    paths: [][]u8,
+
+    pub fn deinit(self: *ImageResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.markdown);
+        for (self.markers) |m| allocator.free(m);
+        allocator.free(self.markers);
+        for (self.paths) |p| allocator.free(p);
+        allocator.free(self.paths);
+    }
+};
+
+/// Scan `md` for standalone local-image lines (outside fenced code blocks),
+/// replace each with a unique marker, and resolve its path against `base_dir`.
+/// Non-image extensions and URLs are left untouched. Caller owns the result.
+pub fn extract(allocator: std.mem.Allocator, md: []const u8, base_dir: ?[]const u8) !ImageResult {
+    var markers: std.ArrayList([]u8) = .empty;
+    var paths: std.ArrayList([]u8) = .empty;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer {
+        for (markers.items) |m| allocator.free(m);
+        markers.deinit(allocator);
+        for (paths.items) |p| allocator.free(p);
+        paths.deinit(allocator);
+        out.deinit(allocator);
+    }
+
+    var in_fence = false;
+    var fence_char: u8 = '`';
+    var fence_len: usize = 0;
+
+    var it = std.mem.splitScalar(u8, md, '\n');
+    while (it.next()) |line| {
+        if (in_fence) {
+            try out.appendSlice(allocator, line);
+            try out.append(allocator, '\n');
+            if (mermaid.isClosingFence(line, fence_char, fence_len)) in_fence = false;
+            continue;
+        }
+
+        const stripped = mermaid.stripIndent(line);
+        if (mermaid.detectFenceOpen(stripped)) |f| {
+            in_fence = true;
+            fence_char = f.ch;
+            fence_len = f.len;
+            try out.appendSlice(allocator, line);
+            try out.append(allocator, '\n');
+            continue;
+        }
+
+        if (parseStandaloneImage(line)) |dest| {
+            if (!isUrl(dest) and isImageExt(dest)) {
+                const marker = try std.fmt.allocPrint(allocator, "{s}{d}", .{ marker_prefix, markers.items.len });
+                // Free `marker` if path resolution fails before it is appended;
+                // once appended, the outer errdefer owns it (avoids double-free).
+                const resolved = resolvePath(allocator, base_dir, dest) catch |e| {
+                    allocator.free(marker);
+                    return e;
+                };
+                try markers.append(allocator, marker);
+                try paths.append(allocator, resolved);
+                // Emit the marker as its own block (blank lines guarantee zchomd
+                // renders it on a line by itself so replaceMarkers can match it).
+                try out.append(allocator, '\n');
+                try out.appendSlice(allocator, marker);
+                try out.appendSlice(allocator, "\n\n");
+                continue;
+            }
+        }
+
+        try out.appendSlice(allocator, line);
+        try out.append(allocator, '\n');
+    }
+
+    return ImageResult{
+        .markdown = try out.toOwnedSlice(allocator),
+        .markers = try markers.toOwnedSlice(allocator),
+        .paths = try paths.toOwnedSlice(allocator),
+    };
+}
+
+test "extract replaces standalone local images with markers and records paths" {
+    const a = std.testing.allocator;
+    const md =
+        \\# Title
+        \\
+        \\![cap](pic.png)
+        \\
+        \\Some text.
+        \\
+    ;
+    var res = try extract(a, md, null);
+    defer res.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 1), res.markers.len);
+    try std.testing.expectEqual(@as(usize, 1), res.paths.len);
+    try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.markers[0]);
+    try std.testing.expectEqualStrings("pic.png", res.paths[0]);
+    try std.testing.expect(std.mem.indexOf(u8, res.markdown, "ZIGLOWIMAGE0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.markdown, "![cap]") == null);
+}
+
+test "extract skips fenced code, inline images, URLs, and non-image extensions" {
+    const a = std.testing.allocator;
+    const md =
+        \\```
+        \\![incode](no.png)
+        \\```
+        \\
+        \\text ![inline](mid.png) text
+        \\
+        \\![remote](https://x/y.png)
+        \\
+        \\![doc](readme.txt)
+        \\
+    ;
+    var res = try extract(a, md, null);
+    defer res.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 0), res.markers.len);
+    try std.testing.expectEqual(@as(usize, 0), res.paths.len);
+    try std.testing.expect(std.mem.indexOf(u8, res.markdown, "no.png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.markdown, "mid.png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.markdown, "y.png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.markdown, "readme.txt") != null);
+}
+
+test "extract numbers multiple images and resolves against base_dir" {
+    const a = std.testing.allocator;
+    const md =
+        \\![one](a.png)
+        \\
+        \\![two](sub/b.jpg)
+        \\
+    ;
+    var res = try extract(a, md, "base");
+    defer res.deinit(a);
+
+    try std.testing.expectEqual(@as(usize, 2), res.markers.len);
+    try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.markers[0]);
+    try std.testing.expectEqualStrings("ZIGLOWIMAGE1", res.markers[1]);
+    try std.testing.expectEqualStrings("base" ++ std.fs.path.sep_str ++ "a.png", res.paths[0]);
+    try std.testing.expectEqualStrings("base" ++ std.fs.path.sep_str ++ "sub" ++ std.fs.path.sep_str ++ "b.jpg", res.paths[1]);
+}
