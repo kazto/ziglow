@@ -99,3 +99,29 @@ test "parseStandaloneImage rejects non-standalone or non-image lines" {
     try std.testing.expect(parseStandaloneImage("just text") == null);
     try std.testing.expect(parseStandaloneImage("![empty]()") == null);
 }
+
+/// Resolve `path` for reading. Absolute paths are duped as-is; relative paths
+/// are joined against `base_dir` (the Markdown file's directory), or returned
+/// as-is (relative to CWD) when `base_dir` is null. Caller owns the result.
+fn resolvePath(allocator: std.mem.Allocator, base_dir: ?[]const u8, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    const base = base_dir orelse return allocator.dupe(u8, path);
+    return std.fs.path.join(allocator, &.{ base, path });
+}
+
+test "resolvePath joins relative paths against base_dir and passes absolutes through" {
+    const a = std.testing.allocator;
+
+    const rel = try resolvePath(a, "docs", "img/a.png");
+    defer a.free(rel);
+    try std.testing.expectEqualStrings("docs" ++ std.fs.path.sep_str ++ "img" ++ std.fs.path.sep_str ++ "a.png", rel);
+
+    const no_base = try resolvePath(a, null, "a.png");
+    defer a.free(no_base);
+    try std.testing.expectEqualStrings("a.png", no_base);
+
+    const abs_input = if (@import("builtin").os.tag == .windows) "C:\\imgs\\a.png" else "/imgs/a.png";
+    const abs = try resolvePath(a, "docs", abs_input);
+    defer a.free(abs);
+    try std.testing.expectEqualStrings(abs_input, abs);
+}
