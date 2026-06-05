@@ -22,7 +22,7 @@ fn isImageExt(path: []const u8) bool {
     return false;
 }
 
-/// True when `path` looks like a URL / non-local scheme we must not read.
+/// True when `path` carries a URL scheme we do not handle as a local file.
 fn isUrl(path: []const u8) bool {
     const schemes = [_][]const u8{ "http://", "https://", "data:", "ftp://", "file://" };
     for (schemes) |s| {
@@ -61,7 +61,13 @@ fn parseStandaloneImage(line: []const u8) ?[]const u8 {
     if (t.len == 0 or t[t.len - 1] != ')') return null; // nothing after the image
 
     const close_alt = std.mem.indexOf(u8, t, "](") orelse return null;
-    var dest = std.mem.trim(u8, t[close_alt + 2 .. t.len - 1], " \t");
+    // The image must be the whole line: the first `)` at/after the dest must
+    // be the final character. Otherwise there is trailing content or a second
+    // image (e.g. `![a](x.png)![b](y.png)`).
+    const close_paren = std.mem.indexOfScalarPos(u8, t, close_alt + 2, ')') orelse return null;
+    if (close_paren != t.len - 1) return null;
+
+    var dest = std.mem.trim(u8, t[close_alt + 2 .. close_paren], " \t");
     dest = stripTitle(dest);
     if (dest.len >= 2 and dest[0] == '<' and dest[dest.len - 1] == '>') {
         dest = dest[1 .. dest.len - 1];
@@ -98,6 +104,11 @@ test "parseStandaloneImage rejects non-standalone or non-image lines" {
     try std.testing.expect(parseStandaloneImage("a link [x](y)") == null);
     try std.testing.expect(parseStandaloneImage("just text") == null);
     try std.testing.expect(parseStandaloneImage("![empty]()") == null);
+}
+
+test "parseStandaloneImage rejects multiple images on one line" {
+    try std.testing.expect(parseStandaloneImage("![a](x.png)![b](y.png)") == null);
+    try std.testing.expect(parseStandaloneImage("![a](x.png) ![b](y.png)") == null);
 }
 
 /// Resolve `path` for reading. Absolute paths are duped as-is; relative paths
