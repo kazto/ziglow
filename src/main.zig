@@ -178,7 +178,7 @@ fn processContent(
     var style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
     config.applyConfigToStyle(conf, &style_cfg);
 
-    const img_format = termimage.detect(is_terminal, std.fs.File.stdin().isTty());
+    const img_format = termimage.detect(allocator, is_terminal, std.fs.File.stdin().isTty());
     const use_kitty_text_sizing = (img_format == .kitty);
 
     var tr = zchomd.TermRenderer.init(allocator, .{
@@ -244,7 +244,9 @@ fn processContent(
         try tui.runPager(allocator, rendered);
     } else if (use_pager) {
         const default_pager = if (builtin.os.tag == .windows) "more" else "less -R";
-        const pager_cmd = conf.pager orelse termimage.getEnv("PAGER") orelse default_pager;
+        const pager_env = termimage.getEnv(allocator, "PAGER");
+        defer if (pager_env) |pe| allocator.free(pe);
+        const pager_cmd = conf.pager orelse pager_env orelse default_pager;
         try runExternalPager(allocator, rendered, pager_cmd);
     } else {
         try std.fs.File.stdout().writeAll(rendered);

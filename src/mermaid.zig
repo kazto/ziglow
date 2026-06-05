@@ -176,7 +176,8 @@ fn stripIndent(line: []const u8) []const u8 {
 
 /// Search PATH for the `mmdc` binary.  Returns an owned path, or null.
 pub fn findMmdc(allocator: std.mem.Allocator) !?[]u8 {
-    const path_env = termimage.getEnv("PATH") orelse return null;
+    const path_env = termimage.getEnv(allocator, "PATH") orelse return null;
+    defer allocator.free(path_env);
     var dir_it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
     while (dir_it.next()) |dir| {
         const full = try std.fs.path.join(allocator, &.{ dir, "mmdc" });

@@ -5,56 +5,70 @@ const builtin = @import("builtin");
 
 pub const Format = enum { none, iterm2, kitty, sixel };
 
-/// Minimal wrapper for getenv for portability.
-pub fn getEnv(name: []const u8) ?[]const u8 {
-    if (builtin.os.tag == .windows) {
-        // Simple stub for Windows for now to avoid complexity of UTF-16 conversion.
-        return null;
-    }
-    return std.posix.getenv(name);
+/// Look up an environment variable. Caller owns the returned slice and must
+/// free it with `allocator`. Returns null if unset (or on OOM / bad encoding).
+/// Works on Windows too: `getEnvVarOwned` reads the UTF-16 environment and
+/// converts to UTF-8, so it is the portable replacement for `posix.getenv`.
+pub fn getEnv(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch null;
+}
+
+/// True when env var `name` is set and exactly equals `expected`.
+fn envEquals(allocator: std.mem.Allocator, name: []const u8, expected: []const u8) bool {
+    const v = getEnv(allocator, name) orelse return false;
+    defer allocator.free(v);
+    return std.mem.eql(u8, v, expected);
+}
+
+/// True when env var `name` is set and contains `needle`.
+fn envContains(allocator: std.mem.Allocator, name: []const u8, needle: []const u8) bool {
+    const v = getEnv(allocator, name) orelse return false;
+    defer allocator.free(v);
+    return std.mem.indexOf(u8, v, needle) != null;
+}
+
+/// True when env var `name` is set (to any value).
+fn envExists(allocator: std.mem.Allocator, name: []const u8) bool {
+    const v = getEnv(allocator, name) orelse return false;
+    allocator.free(v);
+    return true;
 }
 
 /// Detect the terminal's inline image capability.
 /// Pass whether stdout and stdin are TTYs.
-pub fn detect(stdout_is_tty: bool, stdin_is_tty: bool) Format {
+pub fn detect(allocator: std.mem.Allocator, stdout_is_tty: bool, stdin_is_tty: bool) Format {
     if (!stdout_is_tty) return .none;
 
-    if (builtin.os.tag != .windows) {
-        // Explicit override.
-        if (std.posix.getenv("ZIGLOW_SIXEL")) |v|
-            if (std.mem.eql(u8, v, "1")) return .sixel;
-        if (std.posix.getenv("GLOWM_SIXEL")) |v|
-            if (std.mem.eql(u8, v, "1")) return .sixel;
+    // Explicit override.
+    if (envEquals(allocator, "ZIGLOW_SIXEL", "1")) return .sixel;
+    if (envEquals(allocator, "GLOWM_SIXEL", "1")) return .sixel;
 
-        if (isIterm2()) return .iterm2;
-        if (isKitty()) return .kitty;
-        if (isKnownSixelTerminal()) return .sixel;
-    }
+    if (isIterm2(allocator)) return .iterm2;
+    if (isKitty(allocator)) return .kitty;
+    if (isKnownSixelTerminal(allocator)) return .sixel;
 
     // Query terminal via DA1 (Device Attributes) if stdin is available.
+    // (querySixelViaDA1 is a no-op on Windows.)
     if (stdin_is_tty and querySixelViaDA1()) return .sixel;
 
     return .none;
 }
 
-fn isIterm2() bool {
-    const tp = std.posix.getenv("TERM_PROGRAM") orelse return false;
-    return std.mem.eql(u8, tp, "iTerm.app");
+fn isIterm2(allocator: std.mem.Allocator) bool {
+    return envEquals(allocator, "TERM_PROGRAM", "iTerm.app");
 }
 
-fn isKitty() bool {
-    if (std.posix.getenv("KITTY_WINDOW_ID") != null) return true;
-    const term = std.posix.getenv("TERM") orelse return false;
-    return std.mem.indexOf(u8, term, "xterm-kitty") != null;
+fn isKitty(allocator: std.mem.Allocator) bool {
+    if (envExists(allocator, "KITTY_WINDOW_ID")) return true;
+    return envContains(allocator, "TERM", "xterm-kitty");
 }
 
-fn isKnownSixelTerminal() bool {
-    if (std.posix.getenv("TERM_PROGRAM")) |tp|
-        if (std.mem.eql(u8, tp, "WezTerm")) return true;
-    if (std.posix.getenv("TERM")) |t| {
-        const known = [_][]const u8{ "mlterm", "yaft-256color", "foot", "foot-direct", "contour" };
-        for (known) |name| if (std.mem.eql(u8, t, name)) return true;
-    }
+fn isKnownSixelTerminal(allocator: std.mem.Allocator) bool {
+    if (envEquals(allocator, "TERM_PROGRAM", "WezTerm")) return true;
+    const term = getEnv(allocator, "TERM") orelse return false;
+    defer allocator.free(term);
+    const known = [_][]const u8{ "mlterm", "yaft-256color", "foot", "foot-direct", "contour" };
+    for (known) |name| if (std.mem.eql(u8, term, name)) return true;
     return false;
 }
 
