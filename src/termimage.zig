@@ -43,6 +43,13 @@ pub fn detect(allocator: std.mem.Allocator, stdout_is_tty: bool, stdin_is_tty: b
     if (envEquals(allocator, "ZIGLOW_SIXEL", "1")) return .sixel;
     if (envEquals(allocator, "GLOWM_SIXEL", "1")) return .sixel;
 
+    // Echoes advertises which inline image protocol the host wants via
+    // ECHOES_INLINE_IMAGE_PROTOCOL. On Windows it requests "osc1337" because the
+    // ConPTY layer reconstructs the screen grid and discards Kitty graphics APC
+    // frames, while iTerm2 OSC 1337 inline images pass through untouched. Honor
+    // it before the generic Echoes→Kitty detection below.
+    if (echoesImageFormat(allocator)) |fmt| return fmt;
+
     if (isIterm2(allocator)) return .iterm2;
     if (isKitty(allocator)) return .kitty;
     if (isKnownSixelTerminal(allocator)) return .sixel;
@@ -73,6 +80,31 @@ fn isEchoesTermProgram(term_program: []const u8) bool {
 
 test "TERM_PROGRAM Echoes enables Kitty-compatible handling" {
     try std.testing.expect(isEchoesTermProgram("Echoes"));
+}
+
+/// Map the value Echoes advertises in ECHOES_INLINE_IMAGE_PROTOCOL to a
+/// `Format`. "osc1337" → iTerm2 OSC 1337 (used on Windows, survives ConPTY),
+/// "kitty" → Kitty graphics. Returns null for an unset/unknown value so the
+/// caller falls back to its normal terminal detection.
+fn imageFormatForEchoesProtocol(protocol: []const u8) ?Format {
+    if (std.mem.eql(u8, protocol, "osc1337")) return .iterm2;
+    if (std.mem.eql(u8, protocol, "kitty")) return .kitty;
+    return null;
+}
+
+/// Read ECHOES_INLINE_IMAGE_PROTOCOL and resolve it to a `Format`, or null if
+/// unset/unknown.
+fn echoesImageFormat(allocator: std.mem.Allocator) ?Format {
+    const v = getEnv(allocator, "ECHOES_INLINE_IMAGE_PROTOCOL") orelse return null;
+    defer allocator.free(v);
+    return imageFormatForEchoesProtocol(v);
+}
+
+test "ECHOES_INLINE_IMAGE_PROTOCOL selects image format" {
+    try std.testing.expectEqual(@as(?Format, .iterm2), imageFormatForEchoesProtocol("osc1337"));
+    try std.testing.expectEqual(@as(?Format, .kitty), imageFormatForEchoesProtocol("kitty"));
+    try std.testing.expectEqual(@as(?Format, null), imageFormatForEchoesProtocol(""));
+    try std.testing.expectEqual(@as(?Format, null), imageFormatForEchoesProtocol("sixel"));
 }
 
 fn isKnownSixelTerminal(allocator: std.mem.Allocator) bool {
