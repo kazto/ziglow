@@ -145,9 +145,9 @@ pub fn extract(allocator: std.mem.Allocator, md: []const u8, use_markers: bool) 
 
 // ── Fence helpers ─────────────────────────────────────────────────────────────
 
-const FenceInfo = struct { ch: u8, len: usize };
+pub const FenceInfo = struct { ch: u8, len: usize };
 
-fn detectFenceOpen(line: []const u8) ?FenceInfo {
+pub fn detectFenceOpen(line: []const u8) ?FenceInfo {
     for ([_]u8{ '`', '~' }) |ch| {
         if (line.len >= 3 and line[0] == ch and line[1] == ch and line[2] == ch) {
             var n: usize = 3;
@@ -158,7 +158,7 @@ fn detectFenceOpen(line: []const u8) ?FenceInfo {
     return null;
 }
 
-fn isClosingFence(line: []const u8, fence_char: u8, fence_len: usize) bool {
+pub fn isClosingFence(line: []const u8, fence_char: u8, fence_len: usize) bool {
     const stripped = stripIndent(line);
     const trimmed = std.mem.trimRight(u8, stripped, " \t\r");
     if (trimmed.len < fence_len) return false;
@@ -166,7 +166,7 @@ fn isClosingFence(line: []const u8, fence_char: u8, fence_len: usize) bool {
     return true;
 }
 
-fn stripIndent(line: []const u8) []const u8 {
+pub fn stripIndent(line: []const u8) []const u8 {
     var n: usize = 0;
     while (n < line.len and n < 3 and line[n] == ' ') : (n += 1) {}
     return line[n..];
