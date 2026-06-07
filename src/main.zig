@@ -204,7 +204,6 @@ fn renderTerminal(
     content: []const u8,
     has_mermaid: bool,
     img_format: termimage.Format,
-    word_wrap: u32,
     base_dir: ?[]const u8,
 ) ![]u8 {
     // No image-capable terminal: render as-is (mermaid shows as a code block).
@@ -272,13 +271,18 @@ fn renderTerminal(
     for (img.markers) |m| try all_markers.append(allocator, m);
     for (img_bytes) |b| try all_images.append(allocator, b);
 
+    // Inline images carry no explicit `width=`: the terminal renders them at
+    // their natural size (image pixels / cell pixels) and downscales anything
+    // larger than the screen. Passing the markdown text-wrap width here would
+    // stretch every image to the full content column (a 400x400 square becomes
+    // ~120 cells wide and overflows the viewport height); 0 means "omit width".
     return termimage.replaceMarkers(
         allocator,
         md_rendered,
         all_markers.items,
         all_images.items,
         img_format,
-        word_wrap,
+        0,
     );
 }
 
@@ -314,7 +318,7 @@ fn processContent(
         const has_mermaid = std.mem.indexOf(u8, normalized_content, "```mermaid") != null;
 
         if (is_terminal) {
-            break :blk try renderTerminal(allocator, &tr, normalized_content, has_mermaid, img_format, word_wrap, base_dir);
+            break :blk try renderTerminal(allocator, &tr, normalized_content, has_mermaid, img_format, base_dir);
         }
 
         // Piped output: replace mermaid blocks with placeholder text.
