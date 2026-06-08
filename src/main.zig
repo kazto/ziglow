@@ -9,6 +9,7 @@ const mermaid = @import("mermaid.zig");
 const termimage = @import("termimage.zig");
 const image = @import("image.zig");
 const config = @import("config.zig");
+const cellpx = @import("cellpx.zig");
 
 const version = "0.4.0";
 
@@ -187,14 +188,6 @@ fn processFile(
     try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal, base_dir, conf);
 }
 
-/// Read an image file for inline display. Returns null (caller keeps the marker
-/// line) on any open/read failure or oversize file.
-fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const f = std.fs.cwd().openFile(path, .{}) catch return null;
-    defer f.close();
-    return f.readToEndAlloc(allocator, 32 * 1024 * 1024) catch null;
-}
-
 /// Render `content` for a TTY, substituting mermaid diagrams and standalone
 /// local images with inline graphics. Merges both marker sets and calls
 /// `replaceMarkers` once. Returns an owned rendered string.
@@ -204,6 +197,7 @@ fn renderTerminal(
     content: []const u8,
     has_mermaid: bool,
     img_format: termimage.Format,
+    word_wrap: u32,
     base_dir: ?[]const u8,
 ) ![]u8 {
     // No image-capable terminal: render as-is (mermaid shows as a code block).
@@ -239,8 +233,23 @@ fn renderTerminal(
         }
     }
 
-    // ── Stage 2: image extraction ──
-    var img = try image.extract(allocator, md1, base_dir);
+    // ── Stage 2: image sizing + extraction ──
+    // Ask the terminal for its cell pixel size so each image is laid out at the
+    // exact cell height the terminal will draw. Without this, the image marker
+    // reserves ~1 row in the text flow while the terminal paints many rows,
+    // and following content (e.g. the next shell prompt) is overdrawn. Only
+    // bother when the document actually contains an image candidate.
+    var cell_w: f64 = 0;
+    var cell_h: f64 = 0;
+    if (std.mem.indexOf(u8, md1, "![") != null) {
+        if (cellpx.query()) |c| {
+            cell_w = c.w;
+            cell_h = c.h;
+        }
+    }
+    const term_rows: u32 = zchomptic.terminal.TerminalState.getSize().height;
+
+    var img = try image.extract(allocator, md1, base_dir, cell_w, cell_h, word_wrap, term_rows);
     defer img.deinit(allocator);
 
     // ── Render the fully-substituted markdown ──
@@ -248,41 +257,60 @@ fn renderTerminal(
     defer allocator.free(md_rendered);
 
     // Fast path: nothing to substitute.
-    if (mermaid_markers.len == 0 and img.markers.len == 0) {
+    if (mermaid_markers.len == 0 and img.images.len == 0) {
         return allocator.dupe(u8, md_rendered);
     }
 
-    // ── Read image files into bytes (null on failure) ──
-    const img_bytes = try allocator.alloc(?[]u8, img.paths.len);
+    // ── Merge marker + replacement sets and substitute once ──
+    // Owned encoded escape strings are tracked here and freed after the swap.
+    var encoded: std.ArrayList([]u8) = .empty;
     defer {
-        for (img_bytes) |b| if (b) |v| allocator.free(v);
-        allocator.free(img_bytes);
+        for (encoded.items) |e| allocator.free(e);
+        encoded.deinit(allocator);
     }
-    for (img.paths, 0..) |p, i| img_bytes[i] = readImageFile(allocator, p);
-
-    // ── Merge marker + image sets and substitute once ──
     var all_markers: std.ArrayList([]const u8) = .empty;
     defer all_markers.deinit(allocator);
-    var all_images: std.ArrayList(?[]u8) = .empty;
-    defer all_images.deinit(allocator);
+    var all_replacements: std.ArrayList(?[]const u8) = .empty;
+    defer all_replacements.deinit(allocator);
 
-    for (mermaid_markers) |m| try all_markers.append(allocator, m);
-    for (mermaid_pngs) |p| try all_images.append(allocator, p);
-    for (img.markers) |m| try all_markers.append(allocator, m);
-    for (img_bytes) |b| try all_images.append(allocator, b);
+    // Mermaid diagrams: natural size, single marker (no row reservation).
+    for (mermaid_markers, 0..) |m, i| {
+        try all_markers.append(allocator, m);
+        const png = if (i < mermaid_pngs.len) mermaid_pngs[i] else null;
+        var rep: ?[]const u8 = null;
+        if (png) |p| {
+            if (termimage.encode(allocator, img_format, p, 0, 0) catch null) |e| {
+                try encoded.append(allocator, e);
+                rep = e;
+            }
+        }
+        try all_replacements.append(allocator, rep);
+    }
 
-    // Inline images carry no explicit `width=`: the terminal renders them at
-    // their natural size (image pixels / cell pixels) and downscales anything
-    // larger than the screen. Passing the markdown text-wrap width here would
-    // stretch every image to the full content column (a 400x400 square becomes
-    // ~120 cells wide and overflows the viewport height); 0 means "omit width".
+    // Standalone images: the primary marker becomes the inline-image escape
+    // (sized to cols×rows); spacer markers collapse to "" — their paragraphs
+    // already reserved the remaining image rows in the rendered layout.
+    for (img.images) |im| {
+        try all_markers.append(allocator, im.primary);
+        var rep: ?[]const u8 = null;
+        if (im.bytes) |b| {
+            if (termimage.encode(allocator, img_format, b, im.cols, im.rows) catch null) |e| {
+                try encoded.append(allocator, e);
+                rep = e;
+            }
+        }
+        try all_replacements.append(allocator, rep);
+        for (im.spacers) |s| {
+            try all_markers.append(allocator, s);
+            try all_replacements.append(allocator, @as(?[]const u8, ""));
+        }
+    }
+
     return termimage.replaceMarkers(
         allocator,
         md_rendered,
         all_markers.items,
-        all_images.items,
-        img_format,
-        0,
+        all_replacements.items,
     );
 }
 
@@ -318,7 +346,7 @@ fn processContent(
         const has_mermaid = std.mem.indexOf(u8, normalized_content, "```mermaid") != null;
 
         if (is_terminal) {
-            break :blk try renderTerminal(allocator, &tr, normalized_content, has_mermaid, img_format, base_dir);
+            break :blk try renderTerminal(allocator, &tr, normalized_content, has_mermaid, img_format, word_wrap, base_dir);
         }
 
         // Piped output: replace mermaid blocks with placeholder text.
