@@ -173,8 +173,11 @@ pub const ImageResult = struct {
 };
 
 /// Each marker paragraph occupies two rendered rows (one content row plus the
-/// trailing blank zchomd inserts between block elements). To reserve `rows`
-/// rows of image height we emit ceil(rows / 2) marker paragraphs.
+/// blank zchomd inserts between block elements), and zchomd adds a further
+/// ~3-row bottom margin after the whole block. So floor(rows / 2) paragraphs
+/// reserve just under the image's height, and that trailing margin makes up the
+/// difference — placing following content one row below the image with no gap,
+/// rather than the 3 extra blank rows ceil(rows / 2) would leave.
 const rows_per_marker = 2;
 
 fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
@@ -264,9 +267,10 @@ pub fn extract(
                     }
                 }
 
-                // Reserve ceil(rows / rows_per_marker) marker paragraphs (≥1).
+                // Reserve floor(rows / rows_per_marker) marker paragraphs (≥1);
+                // zchomd's block bottom margin covers the remaining ~1 row.
                 const n_markers: usize = if (rows > 0)
-                    (rows + rows_per_marker - 1) / rows_per_marker
+                    @max(1, rows / rows_per_marker)
                 else
                     1;
 
