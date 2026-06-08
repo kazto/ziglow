@@ -4,6 +4,7 @@
 //! Fenced code blocks are skipped. Mirrors the `mermaid.zig` pipeline.
 const std = @import("std");
 const mermaid = @import("mermaid.zig");
+const imagesize = @import("imagesize.zig");
 
 pub const marker_prefix = "ZIGLOWIMAGE";
 
@@ -137,35 +138,93 @@ test "resolvePath joins relative paths against base_dir and passes absolutes thr
     try std.testing.expectEqualStrings(abs_input, abs);
 }
 
-pub const ImageResult = struct {
-    /// Markdown with each standalone image line replaced by its marker.
-    markdown: []u8,
-    /// Marker strings (parallel to `paths`).
-    markers: [][]u8,
-    /// Resolved local file paths (parallel to `markers`).
-    paths: [][]u8,
+/// One extracted standalone image, with the cell box the terminal should draw
+/// and the markers that reserve that many rows in the rendered text flow.
+pub const Img = struct {
+    /// Marker whose rendered line is swapped for the inline-image escape.
+    primary: []u8,
+    /// Extra markers (blanked to "") whose paragraphs reserve the remaining
+    /// rows of the image's height so following content is not overdrawn.
+    spacers: [][]u8,
+    /// File contents (null when the image could not be read).
+    bytes: ?[]u8,
+    /// Cell box; 0 means "unknown" (terminal falls back to natural size).
+    cols: u32,
+    rows: u32,
 
-    pub fn deinit(self: *ImageResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.markdown);
-        for (self.markers) |m| allocator.free(m);
-        allocator.free(self.markers);
-        for (self.paths) |p| allocator.free(p);
-        allocator.free(self.paths);
+    fn deinit(self: *Img, allocator: std.mem.Allocator) void {
+        allocator.free(self.primary);
+        for (self.spacers) |s| allocator.free(s);
+        allocator.free(self.spacers);
+        if (self.bytes) |b| allocator.free(b);
     }
 };
 
+pub const ImageResult = struct {
+    /// Markdown with each standalone image line replaced by its marker block.
+    markdown: []u8,
+    images: []Img,
+
+    pub fn deinit(self: *ImageResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.markdown);
+        for (self.images) |*img| img.deinit(allocator);
+        allocator.free(self.images);
+    }
+};
+
+/// Each marker paragraph occupies two rendered rows (one content row plus the
+/// blank zchomd inserts between block elements), and zchomd adds a further
+/// ~3-row bottom margin after the whole block. So floor(rows / 2) paragraphs
+/// reserve just under the image's height, and that trailing margin makes up the
+/// difference — placing following content one row below the image with no gap,
+/// rather than the 3 extra blank rows ceil(rows / 2) would leave.
+const rows_per_marker = 2;
+
+fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    const f = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer f.close();
+    return f.readToEndAlloc(allocator, 32 * 1024 * 1024) catch null;
+}
+
+/// Cell box for an image, preserving aspect: natural size (image px / cell px)
+/// unless that exceeds `max_cols` / `max_rows`, in which case it is scaled down.
+/// `cell_w` / `cell_h` of 0 mean "unknown" → returns {0,0} (natural-size path).
+fn cellBox(img_w: u32, img_h: u32, cell_w: f64, cell_h: f64, max_cols: u32, max_rows: u32) struct { cols: u32, rows: u32 } {
+    if (cell_w <= 0 or cell_h <= 0 or img_w == 0 or img_h == 0) return .{ .cols = 0, .rows = 0 };
+    const nat_w = @as(f64, @floatFromInt(img_w)) / cell_w;
+    const nat_h = @as(f64, @floatFromInt(img_h)) / cell_h;
+    var scale: f64 = 1.0;
+    if (max_cols > 0) scale = @min(scale, @as(f64, @floatFromInt(max_cols)) / nat_w);
+    if (max_rows > 0) scale = @min(scale, @as(f64, @floatFromInt(max_rows)) / nat_h);
+    var cols: u32 = @intFromFloat(@ceil(nat_w * scale));
+    var rows: u32 = @intFromFloat(@ceil(nat_h * scale));
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    if (max_cols > 0 and cols > max_cols) cols = max_cols;
+    if (max_rows > 0 and rows > max_rows) rows = max_rows;
+    return .{ .cols = cols, .rows = rows };
+}
+
 /// Scan `md` for standalone local-image lines (outside fenced code blocks),
-/// replace each with a unique marker, and resolve its path against `base_dir`.
-/// Non-image extensions and URLs are left untouched. Caller owns the result.
-pub fn extract(allocator: std.mem.Allocator, md: []const u8, base_dir: ?[]const u8) !ImageResult {
-    var markers: std.ArrayList([]u8) = .empty;
-    var paths: std.ArrayList([]u8) = .empty;
+/// replace each with a marker block, read the file, and compute the cell box
+/// the terminal should draw (so its height matches the reserved rows). When
+/// `cell_w`/`cell_h` are 0 the image keeps natural size and reserves one row.
+/// Caller owns the result.
+pub fn extract(
+    allocator: std.mem.Allocator,
+    md: []const u8,
+    base_dir: ?[]const u8,
+    cell_w: f64,
+    cell_h: f64,
+    max_cols: u32,
+    max_rows: u32,
+) !ImageResult {
+    var images: std.ArrayList(Img) = .empty;
     var out: std.ArrayList(u8) = .empty;
+    var next_marker: usize = 0;
     errdefer {
-        for (markers.items) |m| allocator.free(m);
-        markers.deinit(allocator);
-        for (paths.items) |p| allocator.free(p);
-        paths.deinit(allocator);
+        for (images.items) |*img| img.deinit(allocator);
+        images.deinit(allocator);
         out.deinit(allocator);
     }
 
@@ -194,26 +253,63 @@ pub fn extract(allocator: std.mem.Allocator, md: []const u8, base_dir: ?[]const 
 
         if (parseStandaloneImage(line)) |dest| {
             if (!isUrl(dest) and isImageExt(dest)) {
-                const marker = try std.fmt.allocPrint(allocator, "{s}{d}", .{ marker_prefix, markers.items.len });
-                // Free `marker` if path resolution fails before it is appended;
-                // once appended, the outer errdefer owns it (avoids double-free).
-                const resolved = resolvePath(allocator, base_dir, dest) catch |e| {
-                    allocator.free(marker);
-                    return e;
+                const resolved = try resolvePath(allocator, base_dir, dest);
+                const bytes = readImageFile(allocator, resolved);
+                allocator.free(resolved);
+
+                var cols: u32 = 0;
+                var rows: u32 = 0;
+                if (bytes) |b| {
+                    if (imagesize.dimensions(b)) |d| {
+                        const box = cellBox(d.w, d.h, cell_w, cell_h, max_cols, max_rows);
+                        cols = box.cols;
+                        rows = box.rows;
+                    }
+                }
+
+                // Reserve floor(rows / rows_per_marker) marker paragraphs (≥1);
+                // zchomd's block bottom margin covers the remaining ~1 row.
+                const n_markers: usize = if (rows > 0)
+                    @max(1, rows / rows_per_marker)
+                else
+                    1;
+
+                var img: Img = .{
+                    .primary = undefined,
+                    .spacers = &.{},
+                    .bytes = bytes,
+                    .cols = cols,
+                    .rows = rows,
                 };
-                try markers.append(allocator, marker);
-                // `resolved` is not yet owned by the list; free it if this append
-                // fails (OOM) so it doesn't leak. `marker` is already in `markers`,
-                // owned by the outer errdefer.
-                paths.append(allocator, resolved) catch |e| {
-                    allocator.free(resolved);
-                    return e;
-                };
-                // Emit the marker as its own block (blank lines guarantee zchomd
-                // renders it on a line by itself so replaceMarkers can match it).
+                img.primary = try std.fmt.allocPrint(allocator, "{s}{d}", .{ marker_prefix, next_marker });
+                next_marker += 1;
+                errdefer img.deinit(allocator);
+
+                var spacers: std.ArrayList([]u8) = .empty;
+                errdefer {
+                    for (spacers.items) |s| allocator.free(s);
+                    spacers.deinit(allocator);
+                }
+                var k: usize = 1;
+                while (k < n_markers) : (k += 1) {
+                    const m = try std.fmt.allocPrint(allocator, "{s}{d}", .{ marker_prefix, next_marker });
+                    next_marker += 1;
+                    try spacers.append(allocator, m);
+                }
+                img.spacers = try spacers.toOwnedSlice(allocator);
+
+                // Emit each marker as its own block: leading blank, then the
+                // markers separated by blank lines, so zchomd renders one per
+                // row and replaceMarkers can match each line.
                 try out.append(allocator, '\n');
-                try out.appendSlice(allocator, marker);
+                try out.appendSlice(allocator, img.primary);
                 try out.appendSlice(allocator, "\n\n");
+                for (img.spacers) |s| {
+                    try out.appendSlice(allocator, s);
+                    try out.appendSlice(allocator, "\n\n");
+                }
+
+                try images.append(allocator, img);
                 continue;
             }
         }
@@ -224,8 +320,7 @@ pub fn extract(allocator: std.mem.Allocator, md: []const u8, base_dir: ?[]const 
 
     return ImageResult{
         .markdown = try out.toOwnedSlice(allocator),
-        .markers = try markers.toOwnedSlice(allocator),
-        .paths = try paths.toOwnedSlice(allocator),
+        .images = try images.toOwnedSlice(allocator),
     };
 }
 
@@ -239,13 +334,13 @@ test "extract replaces standalone local images with markers and records paths" {
         \\Some text.
         \\
     ;
-    var res = try extract(a, md, null);
+    // cell_w/cell_h = 0 → natural-size path: one marker, no spacers, no read.
+    var res = try extract(a, md, null, 0, 0, 0, 0);
     defer res.deinit(a);
 
-    try std.testing.expectEqual(@as(usize, 1), res.markers.len);
-    try std.testing.expectEqual(@as(usize, 1), res.paths.len);
-    try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.markers[0]);
-    try std.testing.expectEqualStrings("pic.png", res.paths[0]);
+    try std.testing.expectEqual(@as(usize, 1), res.images.len);
+    try std.testing.expectEqual(@as(usize, 0), res.images[0].spacers.len);
+    try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.images[0].primary);
     try std.testing.expect(std.mem.indexOf(u8, res.markdown, "ZIGLOWIMAGE0") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.markdown, "![cap]") == null);
 }
@@ -264,11 +359,10 @@ test "extract skips fenced code, inline images, URLs, and non-image extensions" 
         \\![doc](readme.txt)
         \\
     ;
-    var res = try extract(a, md, null);
+    var res = try extract(a, md, null, 0, 0, 0, 0);
     defer res.deinit(a);
 
-    try std.testing.expectEqual(@as(usize, 0), res.markers.len);
-    try std.testing.expectEqual(@as(usize, 0), res.paths.len);
+    try std.testing.expectEqual(@as(usize, 0), res.images.len);
     try std.testing.expect(std.mem.indexOf(u8, res.markdown, "no.png") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.markdown, "mid.png") != null);
     try std.testing.expect(std.mem.indexOf(u8, res.markdown, "y.png") != null);
@@ -283,16 +377,30 @@ test "extract numbers multiple images and resolves against base_dir" {
         \\![two](sub/b.jpg)
         \\
     ;
-    var res = try extract(a, md, "base");
+    var res = try extract(a, md, "base", 0, 0, 0, 0);
     defer res.deinit(a);
 
-    try std.testing.expectEqual(@as(usize, 2), res.markers.len);
-    try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.markers[0]);
-    try std.testing.expectEqualStrings("ZIGLOWIMAGE1", res.markers[1]);
-    const exp0 = try std.fs.path.join(a, &.{ "base", "a.png" });
-    defer a.free(exp0);
-    const exp1 = try std.fs.path.join(a, &.{ "base", "sub/b.jpg" });
-    defer a.free(exp1);
-    try std.testing.expectEqualStrings(exp0, res.paths[0]);
-    try std.testing.expectEqualStrings(exp1, res.paths[1]);
+    try std.testing.expectEqual(@as(usize, 2), res.images.len);
+    try std.testing.expectEqualStrings("ZIGLOWIMAGE0", res.images[0].primary);
+    try std.testing.expectEqualStrings("ZIGLOWIMAGE1", res.images[1].primary);
+}
+
+test "cellBox keeps natural size when it fits" {
+    // 400x400 px at an 11x24 cell → 37 cols x 17 rows; fits in 80x50.
+    const box = cellBox(400, 400, 11, 24, 80, 50);
+    try std.testing.expectEqual(@as(u32, 37), box.cols);
+    try std.testing.expectEqual(@as(u32, 17), box.rows);
+}
+
+test "cellBox scales down preserving aspect when too wide" {
+    // 2000x1000 px at 10x20 → 200x50 cells; width cap 80 → scale 0.4 → 80x20.
+    const box = cellBox(2000, 1000, 10, 20, 80, 50);
+    try std.testing.expectEqual(@as(u32, 80), box.cols);
+    try std.testing.expectEqual(@as(u32, 20), box.rows);
+}
+
+test "cellBox returns zero (natural-size path) when cell size is unknown" {
+    const box = cellBox(400, 400, 0, 0, 80, 50);
+    try std.testing.expectEqual(@as(u32, 0), box.cols);
+    try std.testing.expectEqual(@as(u32, 0), box.rows);
 }

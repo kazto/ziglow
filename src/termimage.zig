@@ -162,48 +162,64 @@ fn parseSixelSupport(resp: []const u8) bool {
 // ── Encoding ──────────────────────────────────────────────────────────────────
 
 /// Encode PNG bytes as a terminal image escape sequence.
+/// `width_cells` / `height_cells` size the image in character cells (0 = let
+/// the terminal pick that dimension from the image's natural pixel size).
 /// Returns an owned string, or null for Format.none / encoding failure.
 pub fn encode(
     allocator: std.mem.Allocator,
     format: Format,
     png: []const u8,
     width_cells: u32,
+    height_cells: u32,
 ) !?[]u8 {
     return switch (format) {
         .none => null,
-        .iterm2 => try encodeIterm2(allocator, png, width_cells),
-        .kitty => try encodeKitty(allocator, png, width_cells),
+        .iterm2 => try encodeIterm2(allocator, png, width_cells, height_cells),
+        .kitty => try encodeKitty(allocator, png, width_cells, height_cells),
         .sixel => try encodeSixel(allocator, png),
     };
 }
 
-fn encodeIterm2(allocator: std.mem.Allocator, png: []const u8, width_cells: u32) !?[]u8 {
+fn encodeIterm2(allocator: std.mem.Allocator, png: []const u8, width_cells: u32, height_cells: u32) !?[]u8 {
     const Enc = std.base64.standard.Encoder;
     const b64_len = Enc.calcSize(png.len);
     const b64 = try allocator.alloc(u8, b64_len);
     defer allocator.free(b64);
     _ = Enc.encode(b64, png);
 
-    return @as(?[]u8, if (width_cells > 0)
-        try std.fmt.allocPrint(
-            allocator,
-            "\x1b]1337;File=inline=1;preserveAspectRatio=1;width={d}:{s}\x07\n",
-            .{ width_cells, b64 },
-        )
+    // Build the optional ";width=W;height=H" fragment. Both are given together
+    // so the cell box matches what ziglow reserved in the text flow, keeping
+    // following content from being overdrawn.
+    const dims: []u8 = if (width_cells > 0 and height_cells > 0)
+        try std.fmt.allocPrint(allocator, ";width={d};height={d}", .{ width_cells, height_cells })
+    else if (width_cells > 0)
+        try std.fmt.allocPrint(allocator, ";width={d}", .{width_cells})
     else
-        try std.fmt.allocPrint(
-            allocator,
-            "\x1b]1337;File=inline=1;preserveAspectRatio=1:{s}\x07\n",
-            .{b64},
-        ));
+        try allocator.dupe(u8, "");
+    defer allocator.free(dims);
+
+    return @as(?[]u8, try std.fmt.allocPrint(
+        allocator,
+        "\x1b]1337;File=inline=1;preserveAspectRatio=1{s}:{s}\x07\n",
+        .{ dims, b64 },
+    ));
 }
 
-fn encodeKitty(allocator: std.mem.Allocator, png: []const u8, width_cells: u32) !?[]u8 {
+fn encodeKitty(allocator: std.mem.Allocator, png: []const u8, width_cells: u32, height_cells: u32) !?[]u8 {
     const Enc = std.base64.standard.Encoder;
     const b64_len = Enc.calcSize(png.len);
     const b64 = try allocator.alloc(u8, b64_len);
     defer allocator.free(b64);
     _ = Enc.encode(b64, png);
+
+    // Kitty sizes a placement with c= (columns) and r= (rows).
+    const dims: []u8 = if (width_cells > 0 and height_cells > 0)
+        try std.fmt.allocPrint(allocator, ",c={d},r={d}", .{ width_cells, height_cells })
+    else if (width_cells > 0)
+        try std.fmt.allocPrint(allocator, ",c={d}", .{width_cells})
+    else
+        try allocator.dupe(u8, "");
+    defer allocator.free(dims);
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -214,14 +230,7 @@ fn encodeKitty(allocator: std.mem.Allocator, png: []const u8, width_cells: u32) 
         const end = @min(i + chunk, b64.len);
         const more: u8 = if (end < b64.len) '1' else '0';
         const header = if (i == 0)
-            if (width_cells > 0)
-                try std.fmt.allocPrint(
-                    allocator,
-                    "\x1b_Gf=100,a=T,c={d},m={c};",
-                    .{ width_cells, more },
-                )
-            else
-                try std.fmt.allocPrint(allocator, "\x1b_Gf=100,a=T,m={c};", .{more})
+            try std.fmt.allocPrint(allocator, "\x1b_Gf=100,a=T{s},m={c};", .{ dims, more })
         else
             try std.fmt.allocPrint(allocator, "\x1b_Gm={c};", .{more});
         defer allocator.free(header);
@@ -282,34 +291,18 @@ fn encodeSixel(allocator: std.mem.Allocator, png: []const u8) !?[]u8 {
 
 // ── Marker replacement ────────────────────────────────────────────────────────
 
-/// Replace marker lines in `output` with encoded images.
-/// `markers` and `images` are parallel slices; a null image keeps the original line.
-/// Returns an owned string.
+/// Replace marker lines in `output` with caller-supplied strings.
+/// `markers` and `replacements` are parallel slices. A null replacement keeps
+/// the original line; a non-null replacement (including "") is substituted for
+/// the whole line — "" is used for image-block spacer markers, which only exist
+/// to reserve vertical rows in the text flow. Returns an owned string.
 pub fn replaceMarkers(
     allocator: std.mem.Allocator,
     output: []const u8,
     markers: []const []const u8,
-    images: []const ?[]u8,
-    format: Format,
-    width_cells: u32,
+    replacements: []const ?[]const u8,
 ) ![]u8 {
     if (markers.len == 0) return allocator.dupe(u8, output);
-
-    // Pre-encode images to avoid re-encoding per line.
-    const encoded = try allocator.alloc(?[]u8, markers.len);
-    defer {
-        for (encoded) |e| if (e) |v| allocator.free(v);
-        allocator.free(encoded);
-    }
-    for (0..markers.len) |i| {
-        encoded[i] = if (i < images.len)
-            if (images[i]) |png|
-                encode(allocator, format, png, width_cells) catch null
-            else
-                null
-        else
-            null;
-    }
 
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -328,8 +321,9 @@ pub fn replaceMarkers(
         var replaced = false;
         for (markers, 0..) |marker, i| {
             if (std.mem.eql(u8, trimmed, marker)) {
-                if (encoded[i]) |img| {
-                    try result.appendSlice(allocator, img);
+                const rep: ?[]const u8 = if (i < replacements.len) replacements[i] else null;
+                if (rep) |s| {
+                    try result.appendSlice(allocator, s);
                 } else {
                     try result.appendSlice(allocator, line);
                 }
