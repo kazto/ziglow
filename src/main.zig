@@ -277,7 +277,7 @@ fn renderTerminal(
     for (mermaid_markers, 0..) |m, i| {
         try all_markers.append(allocator, m);
         const png = if (i < mermaid_pngs.len) mermaid_pngs[i] else null;
-        var rep: ?[]const u8 = null;
+        var rep: ?[]const u8 = ""; // blank a failed render rather than leak the marker
         if (png) |p| {
             if (termimage.encode(allocator, img_format, p, 0, 0) catch null) |e| {
                 try encoded.append(allocator, e);
@@ -292,7 +292,9 @@ fn renderTerminal(
     // already reserved the remaining image rows in the rendered layout.
     for (img.images) |im| {
         try all_markers.append(allocator, im.primary);
-        var rep: ?[]const u8 = null;
+        // Default to "" (blank the marker) so a missing/undecodable image
+        // doesn't leak its internal "ZIGLOWIMAGEn" placeholder onto the screen.
+        var rep: ?[]const u8 = "";
         if (im.bytes) |b| {
             if (termimage.encode(allocator, img_format, b, im.cols, im.rows) catch null) |e| {
                 try encoded.append(allocator, e);
@@ -636,6 +638,12 @@ fn applySgrToEchoesStyleMetadata(meta: *EchoesStyleMetadata, params: []const u8)
             else => i += 1,
         }
     }
+}
+
+test {
+    // Pull in tests from imported modules so `zig build test` runs them;
+    // Zig only auto-discovers tests in the root source file otherwise.
+    _ = @import("imagesize.zig");
 }
 
 test "osc66End accepts BEL terminator" {
