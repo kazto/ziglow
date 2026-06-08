@@ -642,8 +642,13 @@ fn applySgrToEchoesStyleMetadata(meta: *EchoesStyleMetadata, params: []const u8)
 
 test {
     // Pull in tests from imported modules so `zig build test` runs them;
-    // Zig only auto-discovers tests in the root source file otherwise.
+    // Zig only auto-discovers tests in the root source file otherwise. Each
+    // file must be referenced directly — referencing image.zig does not
+    // transitively include imagesize.zig's tests.
+    _ = @import("termimage.zig");
+    _ = @import("image.zig");
     _ = @import("imagesize.zig");
+    _ = @import("config.zig");
 }
 
 test "osc66End accepts BEL terminator" {
