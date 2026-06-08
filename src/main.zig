@@ -11,7 +11,7 @@ const image = @import("image.zig");
 const config = @import("config.zig");
 const cellpx = @import("cellpx.zig");
 
-const version = "0.5.0";
+const version = "0.6.0";
 
 const readme_names = [_][]const u8{
     "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
