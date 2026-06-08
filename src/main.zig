@@ -9,6 +9,7 @@ const mermaid = @import("mermaid.zig");
 const termimage = @import("termimage.zig");
 const image = @import("image.zig");
 const config = @import("config.zig");
+const cellpx = @import("cellpx.zig");
 
 const version = "0.5.0";
 
@@ -187,14 +188,6 @@ fn processFile(
     try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal, base_dir, conf);
 }
 
-/// Read an image file for inline display. Returns null (caller keeps the marker
-/// line) on any open/read failure or oversize file.
-fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const f = std.fs.cwd().openFile(path, .{}) catch return null;
-    defer f.close();
-    return f.readToEndAlloc(allocator, 32 * 1024 * 1024) catch null;
-}
-
 /// Render `content` for a TTY, substituting mermaid diagrams and standalone
 /// local images with inline graphics. Merges both marker sets and calls
 /// `replaceMarkers` once. Returns an owned rendered string.
@@ -240,8 +233,23 @@ fn renderTerminal(
         }
     }
 
-    // ── Stage 2: image extraction ──
-    var img = try image.extract(allocator, md1, base_dir);
+    // ── Stage 2: image sizing + extraction ──
+    // Ask the terminal for its cell pixel size so each image is laid out at the
+    // exact cell height the terminal will draw. Without this, the image marker
+    // reserves ~1 row in the text flow while the terminal paints many rows,
+    // and following content (e.g. the next shell prompt) is overdrawn. Only
+    // bother when the document actually contains an image candidate.
+    var cell_w: f64 = 0;
+    var cell_h: f64 = 0;
+    if (std.mem.indexOf(u8, md1, "![") != null) {
+        if (cellpx.query()) |c| {
+            cell_w = c.w;
+            cell_h = c.h;
+        }
+    }
+    const term_rows: u32 = zchomptic.terminal.TerminalState.getSize().height;
+
+    var img = try image.extract(allocator, md1, base_dir, cell_w, cell_h, word_wrap, term_rows);
     defer img.deinit(allocator);
 
     // ── Render the fully-substituted markdown ──
@@ -249,36 +257,62 @@ fn renderTerminal(
     defer allocator.free(md_rendered);
 
     // Fast path: nothing to substitute.
-    if (mermaid_markers.len == 0 and img.markers.len == 0) {
+    if (mermaid_markers.len == 0 and img.images.len == 0) {
         return allocator.dupe(u8, md_rendered);
     }
 
-    // ── Read image files into bytes (null on failure) ──
-    const img_bytes = try allocator.alloc(?[]u8, img.paths.len);
+    // ── Merge marker + replacement sets and substitute once ──
+    // Owned encoded escape strings are tracked here and freed after the swap.
+    var encoded: std.ArrayList([]u8) = .empty;
     defer {
-        for (img_bytes) |b| if (b) |v| allocator.free(v);
-        allocator.free(img_bytes);
+        for (encoded.items) |e| allocator.free(e);
+        encoded.deinit(allocator);
     }
-    for (img.paths, 0..) |p, i| img_bytes[i] = readImageFile(allocator, p);
-
-    // ── Merge marker + image sets and substitute once ──
     var all_markers: std.ArrayList([]const u8) = .empty;
     defer all_markers.deinit(allocator);
-    var all_images: std.ArrayList(?[]u8) = .empty;
-    defer all_images.deinit(allocator);
+    var all_replacements: std.ArrayList(?[]const u8) = .empty;
+    defer all_replacements.deinit(allocator);
 
-    for (mermaid_markers) |m| try all_markers.append(allocator, m);
-    for (mermaid_pngs) |p| try all_images.append(allocator, p);
-    for (img.markers) |m| try all_markers.append(allocator, m);
-    for (img_bytes) |b| try all_images.append(allocator, b);
+    // Mermaid diagrams: natural size, single marker (no row reservation).
+    for (mermaid_markers, 0..) |m, i| {
+        try all_markers.append(allocator, m);
+        const png = if (i < mermaid_pngs.len) mermaid_pngs[i] else null;
+        var rep: ?[]const u8 = ""; // blank a failed render rather than leak the marker
+        if (png) |p| {
+            if (termimage.encode(allocator, img_format, p, 0, 0) catch null) |e| {
+                try encoded.append(allocator, e);
+                rep = e;
+            }
+        }
+        try all_replacements.append(allocator, rep);
+    }
+
+    // Standalone images: the primary marker becomes the inline-image escape
+    // (sized to cols×rows); spacer markers collapse to "" — their paragraphs
+    // already reserved the remaining image rows in the rendered layout.
+    for (img.images) |im| {
+        try all_markers.append(allocator, im.primary);
+        // Default to "" (blank the marker) so a missing/undecodable image
+        // doesn't leak its internal "ZIGLOWIMAGEn" placeholder onto the screen.
+        var rep: ?[]const u8 = "";
+        if (im.bytes) |b| {
+            if (termimage.encode(allocator, img_format, b, im.cols, im.rows) catch null) |e| {
+                try encoded.append(allocator, e);
+                rep = e;
+            }
+        }
+        try all_replacements.append(allocator, rep);
+        for (im.spacers) |s| {
+            try all_markers.append(allocator, s);
+            try all_replacements.append(allocator, @as(?[]const u8, ""));
+        }
+    }
 
     return termimage.replaceMarkers(
         allocator,
         md_rendered,
         all_markers.items,
-        all_images.items,
-        img_format,
-        word_wrap,
+        all_replacements.items,
     );
 }
 
@@ -604,6 +638,17 @@ fn applySgrToEchoesStyleMetadata(meta: *EchoesStyleMetadata, params: []const u8)
             else => i += 1,
         }
     }
+}
+
+test {
+    // Pull in tests from imported modules so `zig build test` runs them;
+    // Zig only auto-discovers tests in the root source file otherwise. Each
+    // file must be referenced directly — referencing image.zig does not
+    // transitively include imagesize.zig's tests.
+    _ = @import("termimage.zig");
+    _ = @import("image.zig");
+    _ = @import("imagesize.zig");
+    _ = @import("config.zig");
 }
 
 test "osc66End accepts BEL terminator" {
