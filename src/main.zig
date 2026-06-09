@@ -336,7 +336,7 @@ fn processContent(
     config.applyConfigToStyle(conf, &style_cfg);
 
     const img_format = termimage.detect(allocator, is_terminal, std.fs.File.stdin().isTty());
-    const use_kitty_text_sizing = (img_format == .kitty);
+    const use_kitty_text_sizing = termimage.detectTextSizing(allocator, is_terminal);
 
     var tr = zchomd.TermRenderer.init(allocator, .{
         .styles = style_cfg,
