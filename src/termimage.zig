@@ -61,6 +61,24 @@ pub fn detect(allocator: std.mem.Allocator, stdout_is_tty: bool, stdin_is_tty: b
     return .none;
 }
 
+/// Detect whether the terminal supports Kitty Text Sizing Protocol (OSC 66).
+/// This is intentionally independent from inline graphics detection: Echoes on
+/// Windows can use iTerm2 OSC 1337 for graphics while still supporting OSC 66.
+pub fn detectTextSizing(allocator: std.mem.Allocator, stdout_is_tty: bool) bool {
+    if (!stdout_is_tty) return false;
+
+    const term_program = getEnv(allocator, "TERM_PROGRAM");
+    defer if (term_program) |v| allocator.free(v);
+    const term = getEnv(allocator, "TERM");
+    defer if (term) |v| allocator.free(v);
+
+    return textSizingForEnv(
+        term_program,
+        term,
+        envExists(allocator, "KITTY_WINDOW_ID"),
+    );
+}
+
 fn isIterm2(allocator: std.mem.Allocator) bool {
     return envEquals(allocator, "TERM_PROGRAM", "iTerm.app");
 }
@@ -105,6 +123,21 @@ test "ECHOES_INLINE_IMAGE_PROTOCOL selects image format" {
     try std.testing.expectEqual(@as(?Format, .kitty), imageFormatForEchoesProtocol("kitty"));
     try std.testing.expectEqual(@as(?Format, null), imageFormatForEchoesProtocol(""));
     try std.testing.expectEqual(@as(?Format, null), imageFormatForEchoesProtocol("sixel"));
+}
+
+fn textSizingForEnv(term_program: ?[]const u8, term: ?[]const u8, kitty_window_id_exists: bool) bool {
+    if (kitty_window_id_exists) return true;
+    if (term_program) |tp| {
+        if (isEchoesTermProgram(tp)) return true;
+    }
+    if (term) |t| {
+        if (std.mem.indexOf(u8, t, "xterm-kitty") != null) return true;
+    }
+    return false;
+}
+
+test "Echoes OSC 1337 graphics still supports Kitty text sizing" {
+    try std.testing.expect(textSizingForEnv("Echoes", "xterm-256color", false));
 }
 
 fn isKnownSixelTerminal(allocator: std.mem.Allocator) bool {
