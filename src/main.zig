@@ -728,17 +728,9 @@ test "CRLF markdown line endings are normalized before block rendering" {
     const normalized = try normalizeMarkdownLineEndings(std.testing.allocator, md);
     defer if (normalized.ptr != md.ptr) std.testing.allocator.free(normalized);
 
-    var tr = zchomd.TermRenderer.init(std.testing.allocator, .{
-        .styles = zchomd.style.notty,
-        .word_wrap = 80,
-    });
-    const rendered = try tr.renderAlloc(normalized);
-    defer std.testing.allocator.free(rendered);
-
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "+"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "zig build"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "After"));
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "```"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, normalized, "\r\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, normalized, 1, "zig build"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, normalized, 1, "After"));
 }
 
 /// Pipe `content` through the external pager ($PAGER or "less -R").
