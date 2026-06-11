@@ -5,16 +5,16 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .zchomd = .{
-            .url = "git+https://github.com/kazto/zchomd#b25900d306b311c37d4a409ff2ac90f451bd8192",
-            .hash = "zchomd-0.2.0-1u20dDCUAQAZ29S7HWo_4sQ9MKG9krNi3r-9cOM5DDf9",
+            .url = "git+https://github.com/kazto/zchomd?ref=5a28d236ab005a9130a6b55b0fb4b5f2f255d0ae#5a28d236ab005a9130a6b55b0fb4b5f2f255d0ae",
+            .hash = "zchomd-1.0.0-1u20dAWVAQAHstSpdAneR614wd_uMZUX6dIZOll_rZTI",
         },
         .zchomptic = .{
-            .url = "git+https://github.com/kazto/zchomptic.git#dfb530013925067581113729b86017864a70b54d",
-            .hash = "zchomptic-0.1.3-h-Ha50KdAACSsyEcn3cnkYGFLULgHtUMCzrVame4ynTI",
+            .url = "git+https://github.com/kazto/zchomptic.git#c2b6775b57902d087390917ca6663ccde07a0834",
+            .hash = "zchomptic-1.0.0-h-Ha5-ifAAC0JT-b9q8L2OR5Fosn_lIdnvNUgafche7E",
         },
         .zcholor = .{
-            .url = "git+https://github.com/kazto/zcholor#66affdc5de949ec80198aaf8efe8b4ccc6c1c8f4",
-            .hash = "zcholor-0.1.0-fnTlIp_8AABQvKHBGzY8YJaiAarWnG2tZ4w-knUo7X4-",
+            .url = "git+https://github.com/kazto/zcholor.git#0cafb6b58d2716fbf18c896117aaef1fa5c6f520",
+            .hash = "zcholor-1.0.0-fnTlInb8AAAoR5q3xJfZCt933gzqF4Sn8GGotfIZGCYR",
         },
     },
     .paths = .{

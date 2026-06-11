@@ -1,6 +1,7 @@
 //! TUI pager for ziglow — scrollable markdown viewer using zchomptic.
 const std = @import("std");
 const zchomptic = @import("zchomptic");
+const compat = @import("compat.zig");
 
 /// Scrollable pager model.
 pub const Pager = struct {
@@ -58,7 +59,7 @@ pub const Pager = struct {
         return null;
     }
 
-    pub fn view(self: *Pager, writer: std.io.AnyWriter) !void {
+    pub fn view(self: *Pager, writer: *std.Io.Writer) !void {
         const total = self.lines.items.len;
         const end = @min(self.offset + self.height, total);
         for (self.lines.items[self.offset..end]) |line| {
@@ -92,15 +93,14 @@ pub const Pager = struct {
 };
 
 /// Run the TUI pager displaying `content` (pre-rendered ANSI text).
-pub fn runPager(allocator: std.mem.Allocator, content: []const u8) !void {
+pub fn runPager(allocator: std.mem.Allocator, io: std.Io, content: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const aa = arena.allocator();
 
     // Enter alternate screen, clear, and disable autowrap
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll("\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H");
-    defer stdout.writeAll("\x1b[?7h\x1b[?1049l") catch {};
+    try compat.stdoutWriteAll(io, "\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H");
+    defer compat.stdoutWriteAll(io, "\x1b[?7h\x1b[?1049l") catch {};
 
     const sz = zchomptic.terminal.TerminalState.getSize();
     const height: usize = if (sz.height > 2) @as(usize, sz.height) - 1 else 10;
@@ -125,11 +125,9 @@ pub fn runPager(allocator: std.mem.Allocator, content: []const u8) !void {
         .height = height,
     };
 
-    var prog = zchomptic.Program.init(aa, zchomptic.model(&pager));
+    var prog = zchomptic.Program.init(aa, io, zchomptic.model(&pager));
     defer {
         prog.deinit();
-        // Give background thread a moment to exit before we nukes its memory.
-        std.Thread.sleep(150 * std.time.ns_per_ms);
     }
     try prog.run();
 }

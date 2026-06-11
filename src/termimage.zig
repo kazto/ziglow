@@ -2,61 +2,61 @@
 //! Supports iTerm2 inline images, Kitty graphics protocol, and Sixel graphics.
 const std = @import("std");
 const builtin = @import("builtin");
+const compat = @import("compat.zig");
 
 pub const Format = enum { none, iterm2, kitty, sixel };
 
 /// Look up an environment variable. Caller owns the returned slice and must
 /// free it with `allocator`. Returns null if unset (or on OOM / bad encoding).
-/// Works on Windows too: `getEnvVarOwned` reads the UTF-16 environment and
-/// converts to UTF-8, so it is the portable replacement for `posix.getenv`.
-pub fn getEnv(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch null;
+pub fn getEnv(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, name: []const u8) ?[]u8 {
+    const value = env.get(name) orelse return null;
+    return allocator.dupe(u8, value) catch null;
 }
 
 /// True when env var `name` is set and exactly equals `expected`.
-fn envEquals(allocator: std.mem.Allocator, name: []const u8, expected: []const u8) bool {
-    const v = getEnv(allocator, name) orelse return false;
+fn envEquals(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, name: []const u8, expected: []const u8) bool {
+    const v = getEnv(allocator, env, name) orelse return false;
     defer allocator.free(v);
     return std.mem.eql(u8, v, expected);
 }
 
 /// True when env var `name` is set and contains `needle`.
-fn envContains(allocator: std.mem.Allocator, name: []const u8, needle: []const u8) bool {
-    const v = getEnv(allocator, name) orelse return false;
+fn envContains(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, name: []const u8, needle: []const u8) bool {
+    const v = getEnv(allocator, env, name) orelse return false;
     defer allocator.free(v);
     return std.mem.indexOf(u8, v, needle) != null;
 }
 
 /// True when env var `name` is set (to any value).
-fn envExists(allocator: std.mem.Allocator, name: []const u8) bool {
-    const v = getEnv(allocator, name) orelse return false;
+fn envExists(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, name: []const u8) bool {
+    const v = getEnv(allocator, env, name) orelse return false;
     allocator.free(v);
     return true;
 }
 
 /// Detect the terminal's inline image capability.
 /// Pass whether stdout and stdin are TTYs.
-pub fn detect(allocator: std.mem.Allocator, stdout_is_tty: bool, stdin_is_tty: bool) Format {
+pub fn detect(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, stdout_is_tty: bool, stdin_is_tty: bool) Format {
     if (!stdout_is_tty) return .none;
 
     // Explicit override.
-    if (envEquals(allocator, "ZIGLOW_SIXEL", "1")) return .sixel;
-    if (envEquals(allocator, "GLOWM_SIXEL", "1")) return .sixel;
+    if (envEquals(allocator, env, "ZIGLOW_SIXEL", "1")) return .sixel;
+    if (envEquals(allocator, env, "GLOWM_SIXEL", "1")) return .sixel;
 
     // Echoes advertises which inline image protocol the host wants via
     // ECHOES_INLINE_IMAGE_PROTOCOL. On Windows it requests "osc1337" because the
     // ConPTY layer reconstructs the screen grid and discards Kitty graphics APC
     // frames, while iTerm2 OSC 1337 inline images pass through untouched. Honor
     // it before the generic Echoes→Kitty detection below.
-    if (echoesImageFormat(allocator)) |fmt| return fmt;
+    if (echoesImageFormat(allocator, env)) |fmt| return fmt;
 
-    if (isIterm2(allocator)) return .iterm2;
-    if (isKitty(allocator)) return .kitty;
-    if (isKnownSixelTerminal(allocator)) return .sixel;
+    if (isIterm2(allocator, env)) return .iterm2;
+    if (isKitty(allocator, env)) return .kitty;
+    if (isKnownSixelTerminal(allocator, env)) return .sixel;
 
     // Query terminal via DA1 (Device Attributes) if stdin is available.
     // (querySixelViaDA1 is a no-op on Windows.)
-    if (stdin_is_tty and querySixelViaDA1()) return .sixel;
+    if (stdin_is_tty and querySixelViaDA1(io)) return .sixel;
 
     return .none;
 }
@@ -64,32 +64,32 @@ pub fn detect(allocator: std.mem.Allocator, stdout_is_tty: bool, stdin_is_tty: b
 /// Detect whether the terminal supports Kitty Text Sizing Protocol (OSC 66).
 /// This is intentionally independent from inline graphics detection: Echoes on
 /// Windows can use iTerm2 OSC 1337 for graphics while still supporting OSC 66.
-pub fn detectTextSizing(allocator: std.mem.Allocator, stdout_is_tty: bool) bool {
+pub fn detectTextSizing(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, stdout_is_tty: bool) bool {
     if (!stdout_is_tty) return false;
 
-    const term_program = getEnv(allocator, "TERM_PROGRAM");
+    const term_program = getEnv(allocator, env, "TERM_PROGRAM");
     defer if (term_program) |v| allocator.free(v);
-    const term = getEnv(allocator, "TERM");
+    const term = getEnv(allocator, env, "TERM");
     defer if (term) |v| allocator.free(v);
 
     return textSizingForEnv(
         term_program,
         term,
-        envExists(allocator, "KITTY_WINDOW_ID"),
+        envExists(allocator, env, "KITTY_WINDOW_ID"),
     );
 }
 
-fn isIterm2(allocator: std.mem.Allocator) bool {
-    return envEquals(allocator, "TERM_PROGRAM", "iTerm.app");
+fn isIterm2(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) bool {
+    return envEquals(allocator, env, "TERM_PROGRAM", "iTerm.app");
 }
 
-fn isKitty(allocator: std.mem.Allocator) bool {
-    if (envExists(allocator, "KITTY_WINDOW_ID")) return true;
-    if (getEnv(allocator, "TERM_PROGRAM")) |term_program| {
+fn isKitty(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) bool {
+    if (envExists(allocator, env, "KITTY_WINDOW_ID")) return true;
+    if (getEnv(allocator, env, "TERM_PROGRAM")) |term_program| {
         defer allocator.free(term_program);
         if (isEchoesTermProgram(term_program)) return true;
     }
-    return envContains(allocator, "TERM", "xterm-kitty");
+    return envContains(allocator, env, "TERM", "xterm-kitty");
 }
 
 fn isEchoesTermProgram(term_program: []const u8) bool {
@@ -112,8 +112,8 @@ fn imageFormatForEchoesProtocol(protocol: []const u8) ?Format {
 
 /// Read ECHOES_INLINE_IMAGE_PROTOCOL and resolve it to a `Format`, or null if
 /// unset/unknown.
-fn echoesImageFormat(allocator: std.mem.Allocator) ?Format {
-    const v = getEnv(allocator, "ECHOES_INLINE_IMAGE_PROTOCOL") orelse return null;
+fn echoesImageFormat(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) ?Format {
+    const v = getEnv(allocator, env, "ECHOES_INLINE_IMAGE_PROTOCOL") orelse return null;
     defer allocator.free(v);
     return imageFormatForEchoesProtocol(v);
 }
@@ -140,9 +140,9 @@ test "Echoes OSC 1337 graphics still supports Kitty text sizing" {
     try std.testing.expect(textSizingForEnv("Echoes", "xterm-256color", false));
 }
 
-fn isKnownSixelTerminal(allocator: std.mem.Allocator) bool {
-    if (envEquals(allocator, "TERM_PROGRAM", "WezTerm")) return true;
-    const term = getEnv(allocator, "TERM") orelse return false;
+fn isKnownSixelTerminal(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) bool {
+    if (envEquals(allocator, env, "TERM_PROGRAM", "WezTerm")) return true;
+    const term = getEnv(allocator, env, "TERM") orelse return false;
     defer allocator.free(term);
     const known = [_][]const u8{ "mlterm", "yaft-256color", "foot", "foot-direct", "contour" };
     for (known) |name| if (std.mem.eql(u8, term, name)) return true;
@@ -150,7 +150,7 @@ fn isKnownSixelTerminal(allocator: std.mem.Allocator) bool {
 }
 
 /// Query the terminal via DA1 (Primary Device Attributes) to check for Sixel support.
-fn querySixelViaDA1() bool {
+fn querySixelViaDA1(io: std.Io) bool {
     if (builtin.os.tag == .windows) return false;
 
     const stdin_handle = std.posix.STDIN_FILENO;
@@ -169,10 +169,10 @@ fn querySixelViaDA1() bool {
     defer std.posix.tcsetattr(stdin_handle, .FLUSH, termios) catch {};
 
     // Send Primary Device Attributes query.
-    _ = std.fs.File.stdout().write("\x1b[c") catch return false;
+    compat.stdoutWriteAll(io, "\x1b[c") catch return false;
 
     var buf: [64]u8 = undefined;
-    const n = std.fs.File.stdin().read(&buf) catch return false;
+    const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return false;
     if (n == 0) return false;
 
     return parseSixelSupport(buf[0..n]);
@@ -200,6 +200,7 @@ fn parseSixelSupport(resp: []const u8) bool {
 /// Returns an owned string, or null for Format.none / encoding failure.
 pub fn encode(
     allocator: std.mem.Allocator,
+    io: std.Io,
     format: Format,
     png: []const u8,
     width_cells: u32,
@@ -209,7 +210,7 @@ pub fn encode(
         .none => null,
         .iterm2 => try encodeIterm2(allocator, png, width_cells, height_cells),
         .kitty => try encodeKitty(allocator, png, width_cells, height_cells),
-        .sixel => try encodeSixel(allocator, png),
+        .sixel => try encodeSixel(allocator, io, png),
     };
 }
 
@@ -278,18 +279,18 @@ fn encodeKitty(allocator: std.mem.Allocator, png: []const u8, width_cells: u32, 
 }
 
 /// Encode PNG as Sixel by spawning img2sixel or ImageMagick convert.
-fn encodeSixel(allocator: std.mem.Allocator, png: []const u8) !?[]u8 {
+fn encodeSixel(allocator: std.mem.Allocator, io: std.Io, png: []const u8) !?[]u8 {
     if (builtin.os.tag == .windows) return null;
 
-    const ts: u64 = @bitCast(std.time.milliTimestamp());
+    const ts: u64 = @bitCast(compat.milliTimestamp(io));
     const tmp = try std.fmt.allocPrint(allocator, "/tmp/ziglow_six_{x}.png", .{ts});
     defer allocator.free(tmp);
-    defer std.fs.deleteFileAbsolute(tmp) catch {};
+    defer compat.cwdDeleteFile(io, tmp) catch {};
 
     {
-        const f = std.fs.createFileAbsolute(tmp, .{}) catch return null;
-        defer f.close();
-        f.writeAll(png) catch return null;
+        const f = compat.cwdCreateFile(io, tmp, .{}) catch return null;
+        defer f.close(io);
+        compat.writeFileAll(io, f, png) catch return null;
     }
 
     // Try img2sixel first, then ImageMagick convert.
@@ -298,21 +299,22 @@ fn encodeSixel(allocator: std.mem.Allocator, png: []const u8) !?[]u8 {
         &.{ "convert", tmp, "sixel:-" },
     };
     for (cmds) |argv| {
-        var child = std.process.Child.init(argv, allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch continue;
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .ignore,
+        }) catch continue;
 
         const output: ?[]u8 = if (child.stdout) |stdout|
-            stdout.readToEndAlloc(allocator, 10 * 1024 * 1024) catch blk: {
-                _ = child.wait() catch {};
+            compat.readFileAlloc(io, stdout, allocator, 10 * 1024 * 1024) catch blk: {
+                _ = child.wait(io) catch {};
                 break :blk null;
             }
         else
             null;
 
-        _ = child.wait() catch {};
+        _ = child.wait(io) catch {};
 
         if (output) |o| {
             if (o.len > 0) return o;
