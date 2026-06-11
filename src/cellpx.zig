@@ -11,6 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zchomptic = @import("zchomptic");
+const compat = @import("compat.zig");
 
 pub const CellPx = struct { w: f64, h: f64 };
 
@@ -19,26 +20,26 @@ const is_windows = builtin.os.tag == .windows;
 /// Round-trip CSI 14t / 18t against the terminal. `out_w`/`out_h` are the
 /// text-area pixel size; `cols`/`rows` the character grid. Caller computes
 /// the per-cell size. Returns null on any failure / timeout.
-pub fn query() ?CellPx {
+pub fn query(io: std.Io) ?CellPx {
     // Raw mode so the reply bytes are not line-buffered or echoed.
-    const term = zchomptic.terminal.TerminalState.init() catch return null;
+    const term = zchomptic.terminal.TerminalState.init(io) catch return null;
     defer term.deinit();
 
     // Ask for the pixel size and the character size.
-    std.fs.File.stdout().writeAll("\x1b[14t\x1b[18t") catch return null;
+    compat.stdoutWriteAll(io, "\x1b[14t\x1b[18t") catch return null;
 
     var buf: [256]u8 = undefined;
     var len: usize = 0;
     const deadline_ms: i64 = 400;
-    const start = std.time.milliTimestamp();
+    const start = compat.milliTimestamp(io);
 
     var px_w: ?u32 = null;
     var px_h: ?u32 = null;
     var ch_cols: ?u32 = null;
     var ch_rows: ?u32 = null;
 
-    while (std.time.milliTimestamp() - start < deadline_ms) {
-        const remaining: u32 = @intCast(@max(1, deadline_ms - (std.time.milliTimestamp() - start)));
+    while (compat.milliTimestamp(io) - start < deadline_ms) {
+        const remaining: u32 = @intCast(@max(1, deadline_ms - (compat.milliTimestamp(io) - start)));
         const n = readWithTimeout(buf[len..], remaining) orelse 0;
         if (n > 0) {
             len += n;
