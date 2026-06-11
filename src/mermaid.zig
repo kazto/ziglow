@@ -3,6 +3,7 @@
 //! Rendering:  delegates to the `mmdc` CLI (Mermaid CLI / Node.js).
 const std = @import("std");
 const termimage = @import("termimage.zig");
+const compat = @import("compat.zig");
 
 pub const marker_prefix = "ZIGLOWMERMAID";
 pub const placeholder = "[mermaid diagram omitted]";
@@ -160,7 +161,7 @@ pub fn detectFenceOpen(line: []const u8) ?FenceInfo {
 
 pub fn isClosingFence(line: []const u8, fence_char: u8, fence_len: usize) bool {
     const stripped = stripIndent(line);
-    const trimmed = std.mem.trimRight(u8, stripped, " \t\r");
+    const trimmed = std.mem.trimEnd(u8, stripped, " \t\r");
     if (trimmed.len < fence_len) return false;
     for (trimmed) |c| if (c != fence_char) return false;
     return true;
@@ -175,14 +176,14 @@ pub fn stripIndent(line: []const u8) []const u8 {
 // ── mmdc integration ──────────────────────────────────────────────────────────
 
 /// Search PATH for the `mmdc` binary.  Returns an owned path, or null.
-pub fn findMmdc(allocator: std.mem.Allocator) !?[]u8 {
-    const path_env = termimage.getEnv(allocator, "PATH") orelse return null;
+pub fn findMmdc(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) !?[]u8 {
+    const path_env = termimage.getEnv(allocator, env, "PATH") orelse return null;
     defer allocator.free(path_env);
     var dir_it = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
     while (dir_it.next()) |dir| {
         const full = try std.fs.path.join(allocator, &.{ dir, "mmdc" });
         errdefer allocator.free(full);
-        std.fs.accessAbsolute(full, .{}) catch {
+        compat.cwdAccess(io, full, .{}) catch {
             allocator.free(full);
             continue;
         };
@@ -195,11 +196,12 @@ pub fn findMmdc(allocator: std.mem.Allocator) !?[]u8 {
 /// Returns owned PNG bytes, or null on any failure.
 pub fn renderPNG(
     allocator: std.mem.Allocator,
+    io: std.Io,
     diagram: []const u8,
     mmdc_path: []const u8,
 ) !?[]u8 {
     // Build unique temp paths.
-    const ts: u64 = @bitCast(std.time.milliTimestamp());
+    const ts: u64 = @bitCast(compat.milliTimestamp(io));
     const tmp_in = try std.fmt.allocPrint(allocator, "/tmp/ziglow_{x}.mmd", .{ts});
     defer allocator.free(tmp_in);
     const tmp_out = try std.fmt.allocPrint(allocator, "/tmp/ziglow_{x}.png", .{ts +% 1});
@@ -207,55 +209,54 @@ pub fn renderPNG(
     const tmp_pup = try std.fmt.allocPrint(allocator, "/tmp/ziglow_{x}.json", .{ts +% 2});
     defer allocator.free(tmp_pup);
 
-    defer std.fs.deleteFileAbsolute(tmp_in) catch {};
-    defer std.fs.deleteFileAbsolute(tmp_out) catch {};
-    defer std.fs.deleteFileAbsolute(tmp_pup) catch {};
+    defer compat.cwdDeleteFile(io, tmp_in) catch {};
+    defer compat.cwdDeleteFile(io, tmp_out) catch {};
+    defer compat.cwdDeleteFile(io, tmp_pup) catch {};
 
     // Write diagram source.
     {
-        const f = std.fs.createFileAbsolute(tmp_in, .{}) catch return null;
-        defer f.close();
-        f.writeAll(diagram) catch return null;
+        const f = compat.cwdCreateFile(io, tmp_in, .{}) catch return null;
+        defer f.close(io);
+        compat.writeFileAll(io, f, diagram) catch return null;
     }
 
     // Write puppeteer config to avoid sandbox issues on Linux.
     {
-        const f = std.fs.createFileAbsolute(tmp_pup, .{}) catch return null;
-        defer f.close();
-        f.writeAll("{\"args\":[\"--no-sandbox\"]}") catch return null;
+        const f = compat.cwdCreateFile(io, tmp_pup, .{}) catch return null;
+        defer f.close(io);
+        compat.writeFileAll(io, f, "{\"args\":[\"--no-sandbox\"]}") catch return null;
     }
 
     // Run mmdc.
-    var child = std.process.Child.init(
-        &.{ mmdc_path, "-p", tmp_pup, "-i", tmp_in, "-o", tmp_out },
-        allocator,
-    );
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
-    const term = child.wait() catch return null;
+    var child = std.process.spawn(io, .{
+        .argv = &.{ mmdc_path, "-p", tmp_pup, "-i", tmp_in, "-o", tmp_out },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return null;
+    const term = child.wait(io) catch return null;
     switch (term) {
-        .Exited => |code| if (code != 0) return null,
+        .exited => |code| if (code != 0) return null,
         else => return null,
     }
 
     // Read PNG output.
-    const f = std.fs.openFileAbsolute(tmp_out, .{}) catch return null;
-    defer f.close();
-    return f.readToEndAlloc(allocator, 50 * 1024 * 1024) catch null;
+    const f = compat.cwdOpenFile(io, tmp_out, .{}) catch return null;
+    defer f.close(io);
+    return compat.readFileAlloc(io, f, allocator, 50 * 1024 * 1024) catch null;
 }
 
 /// Render all mermaid blocks.  Returns a slice (same length as `blocks`);
 /// entries are null when rendering of that block failed.
 pub fn renderPNGs(
     allocator: std.mem.Allocator,
+    io: std.Io,
     blocks: []const []u8,
     mmdc_path: []const u8,
 ) ![]?[]u8 {
     const images = try allocator.alloc(?[]u8, blocks.len);
     for (blocks, 0..) |block, i| {
-        images[i] = try renderPNG(allocator, block, mmdc_path);
+        images[i] = try renderPNG(allocator, io, block, mmdc_path);
     }
     return images;
 }

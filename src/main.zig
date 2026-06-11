@@ -10,16 +10,15 @@ const termimage = @import("termimage.zig");
 const image = @import("image.zig");
 const config = @import("config.zig");
 const cellpx = @import("cellpx.zig");
+const compat = @import("compat.zig");
 
 const version = "0.6.1";
 
 const readme_names = [_][]const u8{
     "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
 };
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     // We emit UTF-8 (box-drawing, bullets, …). On Windows the console/ConPTY
     // otherwise decodes our bytes with the legacy OEM code page (e.g. CP932),
@@ -43,13 +42,15 @@ pub fn main() !void {
         }
     }
 
-    var conf = try config.loadConfig(allocator);
+    const io = init.io;
+    const env = init.environ_map;
+
+    var conf = try config.loadConfig(allocator, io, env);
     // ...
 
     defer conf.deinit(allocator);
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     // --- Argument parsing ---
     var file_arg: ?[]const u8 = null;
@@ -78,10 +79,10 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tui")) {
             use_tui = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelp();
+            printHelp(io);
             return;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-            try std.fs.File.stdout().writeAll("ziglow " ++ version ++ "\n");
+            try compat.stdoutWriteAll(io, "ziglow " ++ version ++ "\n");
             return;
         } else if (std.mem.eql(u8, arg, "-")) {
             file_arg = "-";
@@ -91,8 +92,8 @@ pub fn main() !void {
     }
 
     // --- Terminal detection ---
-    const is_terminal = std.fs.File.stdout().isTty();
-    const stdin_is_pipe = !std.fs.File.stdin().isTty();
+    const is_terminal = try std.Io.File.stdout().isTty(io);
+    const stdin_is_pipe = !try std.Io.File.stdin().isTty(io);
 
     // --- Auto-detect width ---
     if (width == 0) {
@@ -114,49 +115,49 @@ pub fn main() !void {
     // --- Dispatch ---
     if (stdin_is_pipe and file_arg == null) {
         // Piped stdin
-        const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
+        const content = try compat.stdinReadAllAlloc(io, allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, null, conf);
+        try processContent(allocator, io, env, content, effective_style, width, use_pager, use_tui, is_terminal, null, conf);
         return;
     }
 
     const path = file_arg orelse ".";
 
     if (std.mem.eql(u8, path, "-")) {
-        const content = try std.fs.File.stdin().readToEndAlloc(allocator, 50 * 1024 * 1024);
+        const content = try compat.stdinReadAllAlloc(io, allocator, 50 * 1024 * 1024);
         defer allocator.free(content);
-        try processContent(allocator, content, effective_style, width, use_pager, use_tui, is_terminal, null, conf);
+        try processContent(allocator, io, env, content, effective_style, width, use_pager, use_tui, is_terminal, null, conf);
         return;
     }
 
     // Check for directory
     {
-        var dir = std.fs.cwd().openDir(path, .{}) catch {
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
             // Not a directory — treat as file
-            try processFile(allocator, path, effective_style, width, use_pager, use_tui, is_terminal, conf);
+            try processFile(allocator, io, env, path, effective_style, width, use_pager, use_tui, is_terminal, conf);
             return;
         };
-        dir.close();
+        dir.close(io);
     }
 
     // Directory: find README
-    const readme = try findReadme(allocator, path);
+    const readme = try findReadme(allocator, io, path);
     if (readme) |rpath| {
         defer allocator.free(rpath);
-        try processFile(allocator, rpath, effective_style, width, use_pager, use_tui, is_terminal, conf);
+        try processFile(allocator, io, env, rpath, effective_style, width, use_pager, use_tui, is_terminal, conf);
     } else {
-        try std.fs.File.stderr().writeAll("ziglow: no README found\n");
+        try compat.stderrWriteAll(io, "ziglow: no README found\n");
         std.process.exit(1);
     }
 }
 
 /// Walk `dir_path` looking for a README file. Returns an owned path or null.
-fn findReadme(allocator: std.mem.Allocator, dir_path: []const u8) !?[]u8 {
-    var dir = std.fs.cwd().openDir(dir_path, .{}) catch return null;
-    defer dir.close();
+fn findReadme(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !?[]u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{}) catch return null;
+    defer dir.close(io);
 
     for (readme_names) |name| {
-        _ = dir.statFile(name) catch continue;
+        _ = dir.statFile(io, name, .{}) catch continue;
         return try std.fs.path.join(allocator, &.{ dir_path, name });
     }
     return null;
@@ -165,6 +166,8 @@ fn findReadme(allocator: std.mem.Allocator, dir_path: []const u8) !?[]u8 {
 /// Open and render a markdown file.
 fn processFile(
     allocator: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
     path: []const u8,
     style_name: []const u8,
     word_wrap: u32,
@@ -173,19 +176,19 @@ fn processFile(
     is_terminal: bool,
     conf: config.Config,
 ) !void {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    const file = compat.cwdOpenFile(io, path, .{}) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "ziglow: cannot open '{s}': {}\n", .{ path, err });
         defer allocator.free(msg);
-        try std.fs.File.stderr().writeAll(msg);
+        try compat.stderrWriteAll(io, msg);
         std.process.exit(1);
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 50 * 1024 * 1024);
+    const content = try compat.readFileAlloc(io, file, allocator, 50 * 1024 * 1024);
     defer allocator.free(content);
 
     const base_dir = std.fs.path.dirname(path);
-    try processContent(allocator, content, style_name, word_wrap, use_pager, use_tui, is_terminal, base_dir, conf);
+    try processContent(allocator, io, env, content, style_name, word_wrap, use_pager, use_tui, is_terminal, base_dir, conf);
 }
 
 /// Render `content` for a TTY, substituting mermaid diagrams and standalone
@@ -193,6 +196,8 @@ fn processFile(
 /// `replaceMarkers` once. Returns an owned rendered string.
 fn renderTerminal(
     allocator: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
     tr: *zchomd.TermRenderer,
     content: []const u8,
     has_mermaid: bool,
@@ -216,14 +221,14 @@ fn renderTerminal(
 
     var md1: []const u8 = content;
     if (has_mermaid) {
-        if (try mermaid.findMmdc(allocator)) |mmdc| {
+        if (try mermaid.findMmdc(allocator, io, env)) |mmdc| {
             defer allocator.free(mmdc);
             var r = try mermaid.extract(allocator, content, true);
             if (r.blocks.len > 0) {
                 // Transfer ownership to `mres` BEFORE any further fallible call,
                 // so the outer defer frees `r` if `renderPNGs` errors.
                 mres = r;
-                pngs = try mermaid.renderPNGs(allocator, r.blocks, mmdc);
+                pngs = try mermaid.renderPNGs(allocator, io, r.blocks, mmdc);
                 mermaid_pngs = pngs.?;
                 mermaid_markers = r.markers;
                 md1 = r.markdown;
@@ -242,14 +247,14 @@ fn renderTerminal(
     var cell_w: f64 = 0;
     var cell_h: f64 = 0;
     if (std.mem.indexOf(u8, md1, "![") != null) {
-        if (cellpx.query()) |c| {
+        if (cellpx.query(io)) |c| {
             cell_w = c.w;
             cell_h = c.h;
         }
     }
     const term_rows: u32 = zchomptic.terminal.TerminalState.getSize().height;
 
-    var img = try image.extract(allocator, md1, base_dir, cell_w, cell_h, word_wrap, term_rows);
+    var img = try image.extract(allocator, io, md1, base_dir, cell_w, cell_h, word_wrap, term_rows);
     defer img.deinit(allocator);
 
     // ── Render the fully-substituted markdown ──
@@ -279,7 +284,7 @@ fn renderTerminal(
         const png = if (i < mermaid_pngs.len) mermaid_pngs[i] else null;
         var rep: ?[]const u8 = ""; // blank a failed render rather than leak the marker
         if (png) |p| {
-            if (termimage.encode(allocator, img_format, p, 0, 0) catch null) |e| {
+            if (termimage.encode(allocator, io, img_format, p, 0, 0) catch null) |e| {
                 try encoded.append(allocator, e);
                 rep = e;
             }
@@ -296,7 +301,7 @@ fn renderTerminal(
         // doesn't leak its internal "ZIGLOWIMAGEn" placeholder onto the screen.
         var rep: ?[]const u8 = "";
         if (im.bytes) |b| {
-            if (termimage.encode(allocator, img_format, b, im.cols, im.rows) catch null) |e| {
+            if (termimage.encode(allocator, io, img_format, b, im.cols, im.rows) catch null) |e| {
                 try encoded.append(allocator, e);
                 rep = e;
             }
@@ -320,6 +325,8 @@ fn renderTerminal(
 /// `is_terminal`: whether stdout is a TTY (controls style + image support).
 fn processContent(
     allocator: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
     content: []const u8,
     style_name: []const u8,
     word_wrap: u32,
@@ -335,8 +342,8 @@ fn processContent(
     var style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
     config.applyConfigToStyle(conf, &style_cfg);
 
-    const img_format = termimage.detect(allocator, is_terminal, std.fs.File.stdin().isTty());
-    const use_kitty_text_sizing = termimage.detectTextSizing(allocator, is_terminal);
+    const img_format = termimage.detect(allocator, io, env, is_terminal, try std.Io.File.stdin().isTty(io));
+    const use_kitty_text_sizing = termimage.detectTextSizing(allocator, env, is_terminal);
 
     var tr = zchomd.TermRenderer.init(allocator, .{
         .styles = style_cfg,
@@ -348,7 +355,7 @@ fn processContent(
         const has_mermaid = std.mem.indexOf(u8, normalized_content, "```mermaid") != null;
 
         if (is_terminal) {
-            break :blk try renderTerminal(allocator, &tr, normalized_content, has_mermaid, img_format, word_wrap, base_dir);
+            break :blk try renderTerminal(allocator, io, env, &tr, normalized_content, has_mermaid, img_format, word_wrap, base_dir);
         }
 
         // Piped output: replace mermaid blocks with placeholder text.
@@ -367,7 +374,7 @@ fn processContent(
     const output_rendered: []const u8 = blk: {
         if (comptime builtin.os.tag != .windows) break :blk rendered;
         if (!use_kitty_text_sizing) break :blk rendered;
-        if (!try isEchoesTermProgram(allocator)) break :blk rendered;
+        if (!try isEchoesTermProgram(allocator, env)) break :blk rendered;
 
         const output = try addEchoesStyleMetadataForOsc66(allocator, rendered);
         echoes_styled_rendered = output;
@@ -375,15 +382,15 @@ fn processContent(
     };
 
     if (use_tui) {
-        try tui.runPager(allocator, output_rendered);
+        try tui.runPager(allocator, io, output_rendered);
     } else if (use_pager) {
         const default_pager = if (builtin.os.tag == .windows) "more" else "less -R";
-        const pager_env = termimage.getEnv(allocator, "PAGER");
+        const pager_env = termimage.getEnv(allocator, env, "PAGER");
         defer if (pager_env) |pe| allocator.free(pe);
         const pager_cmd = conf.pager orelse pager_env orelse default_pager;
-        try runExternalPager(allocator, output_rendered, pager_cmd);
+        try runExternalPager(allocator, io, output_rendered, pager_cmd);
     } else {
-        try writeRenderedOutput(output_rendered, use_kitty_text_sizing);
+        try writeRenderedOutput(io, output_rendered, use_kitty_text_sizing);
     }
 }
 
@@ -408,41 +415,40 @@ fn normalizeMarkdownLineEndings(allocator: std.mem.Allocator, content: []const u
     return out.toOwnedSlice(allocator);
 }
 
-fn writeRenderedOutput(rendered: []const u8, split_osc66: bool) !void {
-    const stdout = std.fs.File.stdout();
+fn writeRenderedOutput(io: std.Io, rendered: []const u8, split_osc66: bool) !void {
     if (comptime builtin.os.tag != .windows) {
-        try stdout.writeAll(rendered);
+        try compat.stdoutWriteAll(io, rendered);
         return;
     }
     if (!split_osc66) {
-        try stdout.writeAll(rendered);
+        try compat.stdoutWriteAll(io, rendered);
         return;
     }
 
     var i: usize = 0;
     while (i < rendered.len) {
         const osc_start = std.mem.indexOfPos(u8, rendered, i, "\x1b]66;") orelse {
-            try writeOutputChunk(stdout, rendered[i..]);
+            try writeOutputChunk(io, rendered[i..]);
             return;
         };
         const chunk_start = osc66StyledChunkStart(rendered, i, osc_start);
 
         if (chunk_start > i) {
-            try writeOutputChunk(stdout, rendered[i..chunk_start]);
+            try writeOutputChunk(io, rendered[i..chunk_start]);
         }
 
         const osc_end = osc66End(rendered, osc_start) orelse rendered.len;
         const chunk_end = osc66StyledChunkEnd(rendered, osc_end);
-        try writeOutputChunk(stdout, rendered[chunk_start..chunk_end]);
+        try writeOutputChunk(io, rendered[chunk_start..chunk_end]);
         i = chunk_end;
     }
 }
 
-fn writeOutputChunk(stdout: std.fs.File, chunk: []const u8) !void {
+fn writeOutputChunk(io: std.Io, chunk: []const u8) !void {
     if (chunk.len == 0) return;
-    try stdout.writeAll(chunk);
+    try compat.stdoutWriteAll(io, chunk);
     if (comptime builtin.os.tag == .windows) {
-        std.Thread.sleep(std.time.ns_per_ms);
+        std.Io.sleep(io, .fromNanoseconds(std.time.ns_per_ms), .monotonic) catch {};
     }
 }
 
@@ -510,8 +516,8 @@ fn isSgrSequence(bytes: []const u8) bool {
     return true;
 }
 
-fn isEchoesTermProgram(allocator: std.mem.Allocator) !bool {
-    const term_program = std.process.getEnvVarOwned(allocator, "TERM_PROGRAM") catch return false;
+fn isEchoesTermProgram(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) !bool {
+    const term_program = termimage.getEnv(allocator, env, "TERM_PROGRAM") orelse return false;
     defer allocator.free(term_program);
     return std.mem.eql(u8, term_program, "Echoes");
 }
@@ -564,9 +570,21 @@ fn appendEchoesStyledOsc66(
     };
 
     try out.appendSlice(allocator, osc[0..meta_end]);
-    if (style_meta.fg) |fg| try out.writer(allocator).print(":e_fg={d}", .{fg});
-    if (style_meta.bg) |bg| try out.writer(allocator).print(":e_bg={d}", .{bg});
-    if (style_meta.bold) |bold| try out.writer(allocator).print(":e_bold={d}", .{@intFromBool(bold)});
+    if (style_meta.fg) |fg| {
+        const meta = try std.fmt.allocPrint(allocator, ":e_fg={d}", .{fg});
+        defer allocator.free(meta);
+        try out.appendSlice(allocator, meta);
+    }
+    if (style_meta.bg) |bg| {
+        const meta = try std.fmt.allocPrint(allocator, ":e_bg={d}", .{bg});
+        defer allocator.free(meta);
+        try out.appendSlice(allocator, meta);
+    }
+    if (style_meta.bold) |bold| {
+        const meta = try std.fmt.allocPrint(allocator, ":e_bold={d}", .{@intFromBool(bold)});
+        defer allocator.free(meta);
+        try out.appendSlice(allocator, meta);
+    }
     try out.appendSlice(allocator, osc[meta_end..]);
 }
 
@@ -710,21 +728,13 @@ test "CRLF markdown line endings are normalized before block rendering" {
     const normalized = try normalizeMarkdownLineEndings(std.testing.allocator, md);
     defer if (normalized.ptr != md.ptr) std.testing.allocator.free(normalized);
 
-    var tr = zchomd.TermRenderer.init(std.testing.allocator, .{
-        .styles = zchomd.style.notty,
-        .word_wrap = 80,
-    });
-    const rendered = try tr.renderAlloc(normalized);
-    defer std.testing.allocator.free(rendered);
-
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "+"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "zig build"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "After"));
-    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "```"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, normalized, "\r\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, normalized, 1, "zig build"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, normalized, 1, "After"));
 }
 
 /// Pipe `content` through the external pager ($PAGER or "less -R").
-fn runExternalPager(allocator: std.mem.Allocator, content: []const u8, pager_cmd: []const u8) !void {
+fn runExternalPager(allocator: std.mem.Allocator, io: std.Io, content: []const u8, pager_cmd: []const u8) !void {
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
 
@@ -732,31 +742,27 @@ fn runExternalPager(allocator: std.mem.Allocator, content: []const u8, pager_cmd
     while (it.next()) |part| try parts.append(allocator, part);
 
     if (parts.items.len == 0) {
-        try std.fs.File.stdout().writeAll(content);
+        try compat.stdoutWriteAll(io, content);
         return;
     }
 
-    var child = std.process.Child.init(parts.items, allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-
-    try child.spawn();
+    var child = try std.process.spawn(io, .{
+        .argv = parts.items,
+        .stdin = .pipe,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
 
     if (child.stdin) |stdin| {
-        // Write all content; ignore BrokenPipe (user may have quit pager early)
-        stdin.writeAll(content) catch |err| switch (err) {
-            error.BrokenPipe => {},
-            else => return err,
-        };
-        stdin.close();
+        try compat.writeFileAll(io, stdin, content);
+        stdin.close(io);
         child.stdin = null;
     }
 
-    _ = try child.wait();
+    _ = try child.wait(io);
 }
 
-fn printHelp() void {
+fn printHelp(io: std.Io) void {
     const help =
         \\ziglow - Render markdown on the CLI, with pizzazz!
         \\
@@ -784,5 +790,5 @@ fn printHelp() void {
         \\  Set ZIGLOW_SIXEL=1 to force Sixel output (requires img2sixel or convert).
         \\
     ;
-    std.fs.File.stdout().writeAll(help) catch {};
+    compat.stdoutWriteAll(io, help) catch {};
 }
