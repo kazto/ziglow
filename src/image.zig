@@ -5,6 +5,7 @@
 const std = @import("std");
 const mermaid = @import("mermaid.zig");
 const imagesize = @import("imagesize.zig");
+const compat = @import("compat.zig");
 
 pub const marker_prefix = "ZIGLOWIMAGE";
 
@@ -81,14 +82,14 @@ fn parseStandaloneImage(line: []const u8) ?[]const u8 {
 /// Strip a trailing `"title"` / `'title'` (separated from the dest by
 /// whitespace) from a link destination. Returns `dest` unchanged otherwise.
 fn stripTitle(dest: []const u8) []const u8 {
-    const trimmed = std.mem.trimRight(u8, dest, " \t");
+    const trimmed = std.mem.trimEnd(u8, dest, " \t");
     if (trimmed.len < 2) return trimmed;
     const quote = trimmed[trimmed.len - 1];
     if (quote != '"' and quote != '\'') return trimmed;
     const open = std.mem.lastIndexOfScalar(u8, trimmed[0 .. trimmed.len - 1], quote) orelse return trimmed;
     if (open == 0) return trimmed;
     if (trimmed[open - 1] != ' ' and trimmed[open - 1] != '\t') return trimmed;
-    return std.mem.trimRight(u8, trimmed[0..open], " \t");
+    return std.mem.trimEnd(u8, trimmed[0..open], " \t");
 }
 
 test "parseStandaloneImage extracts dest from a lone image line" {
@@ -180,10 +181,10 @@ pub const ImageResult = struct {
 /// rather than the 3 extra blank rows ceil(rows / 2) would leave.
 const rows_per_marker = 2;
 
-fn readImageFile(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
-    const f = std.fs.cwd().openFile(path, .{}) catch return null;
-    defer f.close();
-    return f.readToEndAlloc(allocator, 32 * 1024 * 1024) catch null;
+fn readImageFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
+    const f = compat.cwdOpenFile(io, path, .{}) catch return null;
+    defer f.close(io);
+    return compat.readFileAlloc(io, f, allocator, 32 * 1024 * 1024) catch null;
 }
 
 /// Cell box for an image, preserving aspect: natural size (image px / cell px)
@@ -212,6 +213,7 @@ fn cellBox(img_w: u32, img_h: u32, cell_w: f64, cell_h: f64, max_cols: u32, max_
 /// Caller owns the result.
 pub fn extract(
     allocator: std.mem.Allocator,
+    io: std.Io,
     md: []const u8,
     base_dir: ?[]const u8,
     cell_w: f64,
@@ -254,7 +256,7 @@ pub fn extract(
         if (parseStandaloneImage(line)) |dest| {
             if (!isUrl(dest) and isImageExt(dest)) {
                 const resolved = try resolvePath(allocator, base_dir, dest);
-                const bytes = readImageFile(allocator, resolved);
+                const bytes = readImageFile(allocator, io, resolved);
                 allocator.free(resolved);
 
                 var cols: u32 = 0;
@@ -335,7 +337,7 @@ test "extract replaces standalone local images with markers and records paths" {
         \\
     ;
     // cell_w/cell_h = 0 → natural-size path: one marker, no spacers, no read.
-    var res = try extract(a, md, null, 0, 0, 0, 0);
+    var res = try extract(a, std.testing.io, md, null, 0, 0, 0, 0);
     defer res.deinit(a);
 
     try std.testing.expectEqual(@as(usize, 1), res.images.len);
@@ -359,7 +361,7 @@ test "extract skips fenced code, inline images, URLs, and non-image extensions" 
         \\![doc](readme.txt)
         \\
     ;
-    var res = try extract(a, md, null, 0, 0, 0, 0);
+    var res = try extract(a, std.testing.io, md, null, 0, 0, 0, 0);
     defer res.deinit(a);
 
     try std.testing.expectEqual(@as(usize, 0), res.images.len);
@@ -377,7 +379,7 @@ test "extract numbers multiple images and resolves against base_dir" {
         \\![two](sub/b.jpg)
         \\
     ;
-    var res = try extract(a, md, "base", 0, 0, 0, 0);
+    var res = try extract(a, std.testing.io, md, "base", 0, 0, 0, 0);
     defer res.deinit(a);
 
     try std.testing.expectEqual(@as(usize, 2), res.images.len);

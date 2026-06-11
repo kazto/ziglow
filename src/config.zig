@@ -1,5 +1,6 @@
 const std = @import("std");
 const zchomd = @import("zchomd");
+const compat = @import("compat.zig");
 
 pub const Config = struct {
     h1_foreground: ?[]const u8 = null,
@@ -23,11 +24,8 @@ pub const Config = struct {
     }
 };
 
-pub fn loadConfig(allocator: std.mem.Allocator) !Config {
+pub fn loadConfig(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) !Config {
     var conf = Config{};
-
-    var env = try std.process.getEnvMap(allocator);
-    defer env.deinit();
 
     const home = env.get("HOME") orelse return conf;
     const xdg_config_home = env.get("XDG_CONFIG_HOME");
@@ -38,13 +36,13 @@ pub fn loadConfig(allocator: std.mem.Allocator) !Config {
     else
         try std.fmt.bufPrint(&path_buf, "{s}/.config/ziglow/ziglow.toml", .{home});
 
-    const file = std.fs.openFileAbsolute(config_path, .{}) catch |err| {
+    const file = compat.cwdOpenFile(io, config_path, .{}) catch |err| {
         if (err == error.FileNotFound) return conf;
         return err;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    const content = try compat.readFileAlloc(io, file, allocator, 1024 * 1024);
     defer allocator.free(content);
 
     try parseConfig(allocator, &conf, content);
