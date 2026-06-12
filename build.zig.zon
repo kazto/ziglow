@@ -1,16 +1,16 @@
 .{
     .name = .ziglow,
-    .version = "1.0.0",
+    .version = "1.0.1",
     .fingerprint = 0x4461f431d59bcb2d, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zchomd = .{
-            .url = "git+https://github.com/kazto/zchomd?ref=5a28d236ab005a9130a6b55b0fb4b5f2f255d0ae#5a28d236ab005a9130a6b55b0fb4b5f2f255d0ae",
+            .url = "git+https://github.com/kazto/zchomd.git#5a28d236ab005a9130a6b55b0fb4b5f2f255d0ae",
             .hash = "zchomd-1.0.0-1u20dAWVAQAHstSpdAneR614wd_uMZUX6dIZOll_rZTI",
         },
         .zchomptic = .{
-            .url = "git+https://github.com/kazto/zchomptic.git#c2b6775b57902d087390917ca6663ccde07a0834",
-            .hash = "zchomptic-1.0.0-h-Ha5-ifAAC0JT-b9q8L2OR5Fosn_lIdnvNUgafche7E",
+            .url = "git+https://github.com/kazto/zchomptic.git#3d9aea3609e699c7e03abae22e00c351594df5b3",
+            .hash = "zchomptic-1.0.1-h-Ha53irAABG9bqZrpWS3XvZGlPOlM9m9XPFcbr1bVLL",
         },
         .zcholor = .{
             .url = "git+https://github.com/kazto/zcholor.git#0cafb6b58d2716fbf18c896117aaef1fa5c6f520",
