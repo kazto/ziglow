@@ -51,7 +51,13 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.
     if (echoesImageFormat(allocator, env)) |fmt| return fmt;
 
     if (isIterm2(allocator, env)) return .iterm2;
-    if (isKitty(allocator, env)) return .kitty;
+    if (stdin_is_tty) {
+        if (queryKittyGraphics(io)) |supported| {
+            if (supported) return .kitty;
+        } else if (isKitty(allocator, env)) {
+            return .kitty;
+        }
+    } else if (isKitty(allocator, env)) return .kitty;
     if (isKnownSixelTerminal(allocator, env)) return .sixel;
 
     // Query terminal via DA1 (Device Attributes) if stdin is available.
@@ -64,8 +70,11 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.
 /// Detect whether the terminal supports Kitty Text Sizing Protocol (OSC 66).
 /// This is intentionally independent from inline graphics detection: Echoes on
 /// Windows can use iTerm2 OSC 1337 for graphics while still supporting OSC 66.
-pub fn detectTextSizing(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, stdout_is_tty: bool) bool {
+pub fn detectTextSizing(allocator: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, stdout_is_tty: bool, stdin_is_tty: bool) bool {
     if (!stdout_is_tty) return false;
+    if (stdin_is_tty) {
+        if (queryTextSizing(io)) |supported| return supported;
+    }
 
     const term_program = getEnv(allocator, env, "TERM_PROGRAM");
     defer if (term_program) |v| allocator.free(v);
@@ -149,32 +158,155 @@ fn isKnownSixelTerminal(allocator: std.mem.Allocator, env: *const std.process.En
     return false;
 }
 
-/// Query the terminal via DA1 (Primary Device Attributes) to check for Sixel support.
-fn querySixelViaDA1(io: std.Io) bool {
-    if (builtin.os.tag == .windows) return false;
+fn withRawTerminal(comptime func: fn (std.Io) ?bool, io: std.Io) ?bool {
+    if (builtin.os.tag == .windows) return null;
 
     const stdin_handle = std.posix.STDIN_FILENO;
-
-    // Save terminal state and enter raw mode.
-    const termios = std.posix.tcgetattr(stdin_handle) catch return false;
+    const termios = std.posix.tcgetattr(stdin_handle) catch return null;
     var raw = termios;
-    // Disable echoing and canonical mode.
     raw.lflag.ECHO = false;
     raw.lflag.ICANON = false;
-    // Set timeout (VMIN=0, VTIME=2 -> 200ms).
     raw.cc[@intFromEnum(std.posix.system.V.MIN)] = 0;
     raw.cc[@intFromEnum(std.posix.system.V.TIME)] = 2;
 
-    std.posix.tcsetattr(stdin_handle, .FLUSH, raw) catch return false;
+    std.posix.tcsetattr(stdin_handle, .FLUSH, raw) catch return null;
     defer std.posix.tcsetattr(stdin_handle, .FLUSH, termios) catch {};
 
-    // Send Primary Device Attributes query.
-    compat.stdoutWriteAll(io, "\x1b[c") catch return false;
+    return func(io);
+}
 
+fn readProbeResponse(io: std.Io, query: []const u8, buf: []u8) usize {
+    compat.stdoutWriteAll(io, query) catch return 0;
+
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(std.posix.STDIN_FILENO, buf[total..]) catch return total;
+        if (n == 0) break;
+        total += n;
+    }
+    return total;
+}
+
+fn queryKittyGraphics(io: std.Io) ?bool {
+    return withRawTerminal(queryKittyGraphicsRaw, io);
+}
+
+fn queryKittyGraphicsRaw(io: std.Io) ?bool {
+    var buf: [512]u8 = undefined;
+    const n = readProbeResponse(
+        io,
+        "\x1b_Gi=424242,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c",
+        &buf,
+    );
+    if (n == 0) return null;
+    if (parseKittyGraphicsResponse(buf[0..n], 424242)) return true;
+    if (parseDeviceAttributesResponse(buf[0..n])) return false;
+    return null;
+}
+
+fn parseKittyGraphicsResponse(resp: []const u8, id: u32) bool {
+    var needle_buf: [32]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "\x1b_Gi={d};", .{id}) catch return false;
+    return std.mem.indexOf(u8, resp, needle) != null;
+}
+
+test "parse Kitty graphics query response" {
+    try std.testing.expect(parseKittyGraphicsResponse("\x1b_Gi=424242;OK\x1b\\", 424242));
+    try std.testing.expect(parseKittyGraphicsResponse("\x1b_Gi=424242;EINVAL:bad data\x1b\\", 424242));
+    try std.testing.expect(!parseKittyGraphicsResponse("\x1b[?62;4c", 424242));
+    try std.testing.expect(!parseKittyGraphicsResponse("\x1b_Gi=7;OK\x1b\\", 424242));
+}
+
+fn queryTextSizing(io: std.Io) ?bool {
+    return withRawTerminal(queryTextSizingRaw, io);
+}
+
+fn queryTextSizingRaw(io: std.Io) ?bool {
+    var buf: [512]u8 = undefined;
+    const n = readProbeResponse(
+        io,
+        "\x1b7\r\x1b[6n\x1b]66;w=2; \x07\x1b[6n\x1b]66;s=2; \x07\x1b[6n\x1b8",
+        &buf,
+    );
+    if (n == 0) return null;
+
+    var reports: [3]CursorPosition = undefined;
+    const count = parseCursorPositionReports(buf[0..n], &reports);
+    if (count < 3) return null;
+
+    const first = reports[0];
+    const second = reports[1];
+    const third = reports[2];
+    if (second.row != first.row or third.row != second.row) return false;
+    if (second.col < first.col + 2) return false;
+    if (third.col < second.col + 2) return false;
+    return true;
+}
+
+const CursorPosition = struct {
+    row: u32,
+    col: u32,
+};
+
+fn parseCursorPositionReports(resp: []const u8, out: *[3]CursorPosition) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < resp.len and count < out.len) : (i += 1) {
+        if (resp[i] != 0x1b or i + 2 >= resp.len or resp[i + 1] != '[') continue;
+        var j = i + 2;
+        const row_start = j;
+        while (j < resp.len and std.ascii.isDigit(resp[j])) : (j += 1) {}
+        if (j == row_start or j >= resp.len or resp[j] != ';') continue;
+        const row = std.fmt.parseInt(u32, resp[row_start..j], 10) catch continue;
+        j += 1;
+        const col_start = j;
+        while (j < resp.len and std.ascii.isDigit(resp[j])) : (j += 1) {}
+        if (j == col_start or j >= resp.len or resp[j] != 'R') continue;
+        const col = std.fmt.parseInt(u32, resp[col_start..j], 10) catch continue;
+        out[count] = .{ .row = row, .col = col };
+        count += 1;
+        i = j;
+    }
+    return count;
+}
+
+test "parse cursor position reports" {
+    var reports: [3]CursorPosition = undefined;
+    const count = parseCursorPositionReports("noise\x1b[12;1R\x1b[12;3R\x1b[12;5R", &reports);
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqual(CursorPosition{ .row = 12, .col = 1 }, reports[0]);
+    try std.testing.expectEqual(CursorPosition{ .row = 12, .col = 3 }, reports[1]);
+    try std.testing.expectEqual(CursorPosition{ .row = 12, .col = 5 }, reports[2]);
+}
+
+/// Query the terminal via DA1 (Primary Device Attributes) to check for Sixel support.
+fn querySixelViaDA1(io: std.Io) bool {
+    return withRawTerminal(querySixelViaDA1Raw, io) orelse false;
+}
+
+fn parseDeviceAttributesResponse(resp: []const u8) bool {
+    var i: usize = 0;
+    while (i < resp.len) : (i += 1) {
+        if (resp[i] != 0x1b or i + 2 >= resp.len or resp[i + 1] != '[') continue;
+        var j = i + 2;
+        if (j < resp.len and resp[j] == '?') j += 1;
+        const param_start = j;
+        while (j < resp.len and (std.ascii.isDigit(resp[j]) or resp[j] == ';')) : (j += 1) {}
+        if (j > param_start and j < resp.len and resp[j] == 'c') return true;
+    }
+    return false;
+}
+
+test "parse DA1 response presence" {
+    try std.testing.expect(parseDeviceAttributesResponse("\x1b[?62;4c"));
+    try std.testing.expect(parseDeviceAttributesResponse("x\x1b[?1;2c"));
+    try std.testing.expect(!parseDeviceAttributesResponse("\x1b[12;5R"));
+}
+
+fn querySixelViaDA1Raw(io: std.Io) ?bool {
     var buf: [64]u8 = undefined;
-    const n = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return false;
-    if (n == 0) return false;
-
+    const n = readProbeResponse(io, "\x1b[c", &buf);
+    if (n == 0) return null;
     return parseSixelSupport(buf[0..n]);
 }
 

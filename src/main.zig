@@ -342,8 +342,9 @@ fn processContent(
     var style_cfg = zchomd.style.getStandardStyle(style_name) orelse zchomd.style.dark;
     config.applyConfigToStyle(conf, &style_cfg);
 
-    const img_format = termimage.detect(allocator, io, env, is_terminal, try std.Io.File.stdin().isTty(io));
-    const use_kitty_text_sizing = termimage.detectTextSizing(allocator, env, is_terminal);
+    const stdin_is_tty = try std.Io.File.stdin().isTty(io);
+    const img_format = termimage.detect(allocator, io, env, is_terminal, stdin_is_tty);
+    const use_kitty_text_sizing = termimage.detectTextSizing(allocator, io, env, is_terminal, stdin_is_tty);
 
     var tr = zchomd.TermRenderer.init(allocator, .{
         .styles = style_cfg,
