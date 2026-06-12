@@ -111,13 +111,19 @@ fn readWithTimeout(dst: []u8, timeout_ms: u32) ?usize {
     if (dst.len == 0) return 0;
     if (is_windows) {
         const w = std.os.windows;
-        const h = w.kernel32.GetStdHandle(w.STD_INPUT_HANDLE) orelse return null;
+        const K32 = struct {
+            const STD_INPUT_HANDLE: w.DWORD = 0xfffffff6;
+            extern "kernel32" fn GetStdHandle(nStdHandle: w.DWORD) callconv(.winapi) ?w.HANDLE;
+            extern "kernel32" fn WaitForSingleObject(hHandle: w.HANDLE, dwMilliseconds: w.DWORD) callconv(.winapi) w.DWORD;
+            extern "kernel32" fn ReadFile(hFile: w.HANDLE, lpBuffer: *anyopaque, nNumberOfBytesToRead: w.DWORD, lpNumberOfBytesRead: ?*w.DWORD, lpOverlapped: ?*anyopaque) callconv(.winapi) w.BOOL;
+        };
+        const h = K32.GetStdHandle(K32.STD_INPUT_HANDLE) orelse return null;
         const WAIT_OBJECT_0: w.DWORD = 0;
-        const wait = w.kernel32.WaitForSingleObject(h, timeout_ms);
+        const wait = K32.WaitForSingleObject(h, timeout_ms);
         if (wait != WAIT_OBJECT_0) return 0;
         var read: w.DWORD = 0;
-        const ok = w.kernel32.ReadFile(h, dst.ptr, @intCast(dst.len), &read, null);
-        if (ok == 0) return null;
+        const ok = K32.ReadFile(h, dst.ptr, @intCast(dst.len), &read, null);
+        if (!ok.toBool()) return null;
         return @intCast(read);
     }
     const posix = std.posix;

@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
         _ = kernel32.SetConsoleOutputCP(65001); // CP_UTF8
         const stdout_handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE);
         var mode: std.os.windows.DWORD = 0;
-        if (kernel32.GetConsoleMode(stdout_handle, &mode) != 0) {
+        if (kernel32.GetConsoleMode(stdout_handle, &mode).toBool()) {
             _ = kernel32.SetConsoleMode(stdout_handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         }
     }
@@ -448,7 +448,7 @@ fn writeOutputChunk(io: std.Io, chunk: []const u8) !void {
     if (chunk.len == 0) return;
     try compat.stdoutWriteAll(io, chunk);
     if (comptime builtin.os.tag == .windows) {
-        std.Io.sleep(io, .fromNanoseconds(std.time.ns_per_ms), .monotonic) catch {};
+        std.Io.sleep(io, .fromNanoseconds(std.time.ns_per_ms), .awake) catch {};
     }
 }
 
