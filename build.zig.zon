@@ -1,6 +1,6 @@
 .{
     .name = .ziglow,
-    .version = "1.0.1",
+    .version = "1.1.0",
     .fingerprint = 0x4461f431d59bcb2d, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

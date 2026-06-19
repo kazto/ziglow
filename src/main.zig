@@ -12,7 +12,7 @@ const config = @import("config.zig");
 const cellpx = @import("cellpx.zig");
 const compat = @import("compat.zig");
 
-const version = "1.0.0";
+const version = "1.1.0";
 
 const readme_names = [_][]const u8{
     "README.md", "README", "Readme.md", "Readme", "readme.md", "readme",
