@@ -350,6 +350,7 @@ fn processContent(
         .styles = style_cfg,
         .word_wrap = @intCast(word_wrap),
         .use_kitty_text_sizing = use_kitty_text_sizing,
+        .enable_osc8 = is_terminal,
     });
 
     const rendered: []u8 = blk: {
@@ -732,6 +733,20 @@ test "CRLF markdown line endings are normalized before block rendering" {
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, normalized, "\r\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, normalized, 1, "zig build"));
     try std.testing.expect(std.mem.containsAtLeast(u8, normalized, 1, "After"));
+}
+
+test "osc8 enabled for http link when is_terminal=true" {
+    const zchomd_mod = @import("zchomd");
+    const allocator = std.testing.allocator;
+
+    var tr = zchomd_mod.TermRenderer.init(allocator, .{
+        .styles = zchomd_mod.style.notty,
+        .enable_osc8 = true,
+    });
+    const result = try tr.renderAlloc("[Zig](https://ziglang.org)\n");
+    defer allocator.free(result);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, result, 1, "\x1b]8;;https://ziglang.org\x07"));
 }
 
 /// Pipe `content` through the external pager ($PAGER or "less -R").
