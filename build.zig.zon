@@ -5,8 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zchomd = .{
-            .url = "git+https://github.com/kazto/zchomd.git#5a28d236ab005a9130a6b55b0fb4b5f2f255d0ae",
-            .hash = "zchomd-1.0.0-1u20dAWVAQAHstSpdAneR614wd_uMZUX6dIZOll_rZTI",
+            .path = "zig-pkg/zchomd-1.0.0-1u20dAWVAQAHstSpdAneR614wd_uMZUX6dIZOll_rZTI",
         },
         .zchomptic = .{
             .url = "git+https://github.com/kazto/zchomptic.git#3d9aea3609e699c7e03abae22e00c351594df5b3",
